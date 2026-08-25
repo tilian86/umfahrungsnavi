@@ -46,20 +46,19 @@
   var STADT_VMAX = 50;
   var STADT_BIS_KM = 15;
 
-  var KARTEN = {
-    tag:   { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-             hg: '#eae6e0', filter: 'none' },
-    // CARTOs Nachtkarte ist von Haus aus so dunkel, dass die Strassen im Auto
-    // kaum zu erkennen sind. Der Aufhellungsfilter kostet nichts.
-    nacht: { url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-             hg: '#101418', filter: 'brightness(1.9) contrast(.95) saturate(1.2)' }
+  // Vektorkarten statt Rasterbilder: MapLibre rendert selbst. Dadurch bleiben
+  // Strassennamen auch bei gedrehter Karte aufrecht, die Fahransicht bekommt
+  // echte Perspektive, und der Nachtstil ist ein richtiger Stil statt eines
+  // CSS-Filters. Beide Quellen sind offen und ohne Schluessel.
+  var STILE = {
+    tag:   { url: 'https://tiles.openfreemap.org/styles/liberty', hg: '#eae6e0' },
+    nacht: { url: 'https://tiles.versatiles.org/assets/styles/eclipse/style.json', hg: '#101418' }
   };
-  var QUELLE = '&copy; OpenStreetMap, &copy; CARTO · BRouter · Autobahn GmbH';
+  var QUELLE = '© OpenStreetMap · OpenFreeMap · VersaTiles · BRouter · Autobahn GmbH';
 
   /* ------------------------------------------------------------------ Zustand */
-  var karte, kachelLage;
+  var karte;
   var ichMarke, ichKreis, zielMarke = null, stoppMarken = [], blitzMarken = [];
-  var linie = null, nebenlinien = [];
   var standort = null, kurs = null, ziel = null, zielName = '';
   var stopps = [];                       // [{ort:[lat,lon], name:''}]
   var varianten = [], variante = 0;
@@ -91,6 +90,17 @@
 
   /* --------------------------------------------------------------- Geometrie */
   var abstand = window.Verkehr.abstand;
+  // Intern rechnet alles in [lat, lon]; MapLibre will [lon, lat].
+  function m(p) { return [p[1], p[0]]; }
+  function kreisPolygon(ort, radius) {
+    var ecken = [], t = Math.PI / 180;
+    for (var i = 0; i <= 40; i++) {
+      var w = i / 40 * 2 * Math.PI;
+      ecken.push([ort[1] + radius * Math.sin(w) / (111320 * Math.cos(ort[0] * t)),
+                  ort[0] + radius * Math.cos(w) / 110540]);
+    }
+    return ecken;
+  }
   function punktZuStrecke(p, a, b) {
     // Grob in Metern; für "bin ich noch auf der Route" genau genug.
     var kx = 111320 * Math.cos(p[0] * Math.PI / 180), ky = 110540;
@@ -126,32 +136,20 @@
   }
 
   /* ------------------------------------------------------- Fahransicht */
-  // Fahrtrichtung oben, Standort im unteren Drittel, Zoom nach Tempo -
-  // wie bei den grossen Navis. Leaflet kann selbst nicht drehen, deshalb
-  // wird der Kartenbehaelter per CSS rotiert und dafuer vergroessert, damit
-  // beim Drehen keine Ecken frei bleiben. Strassennamen stehen dann schraeg -
-  // der Preis jeder gedrehten Rasterkarte; beim Fahren zaehlt die Geometrie.
-  function fahrmodusAnwenden() {
-    var an = !!(ziel && folgen);
-    if (an === fahrmodus) return;
-    fahrmodus = an;
-    var d = $('karte');
-    d.style.inset = an ? '-30%' : '0';
-    d.style.transition = an ? 'transform .7s linear' : 'none';
-    if (!an) drehungSetzen(0);
-    karte.invalidateSize(false);
+  // Fahrtrichtung oben, Perspektive, Standort im unteren Drittel, Zoom nach
+  // Tempo. MapLibre kann das alles nativ (bearing, pitch, padding) - der
+  // fruehere CSS-Rotations-Umbau des Kartenbehaelters ist damit weg.
+  // Kamerafahrt - aber nur, wenn die Seite sichtbar ist. Im Hintergrund
+  // pausiert der Browser die Animationsschleife, easeTo kaeme nie an und die
+  // Kamera bliebe irgendwo haengen. Dann lieber sofort springen.
+  function kamera(zielwerte) {
+    if (document.hidden) karte.jumpTo(zielwerte);
+    else karte.easeTo(zielwerte);
   }
 
-  // Kuerzester Weg zum neuen Winkel, kumulativ gefuehrt - sonst dreht die
-  // CSS-Uebergangsanimation bei 359 -> 1 einmal falsch herum durch.
-  function drehungSetzen(kurs) {
-    var soll = -kurs;
-    var diff = ((soll - drehung) % 360 + 540) % 360 - 180;
-    drehung += diff;
-    var d = $('karte');
-    d.style.transform = fahrmodus && kurs !== 0 ? 'rotate(' + drehung + 'deg)' : '';
-    // runde Marker (Blitzer-Tempo, Stopp-Nummern) wieder aufrecht stellen
-    d.style.setProperty('--gegen', (-drehung) + 'deg');
+  function fahrmodusAnwenden() {
+    fahrmodus = !!(ziel && folgen);
+    if (!fahrmodus) kamera({ bearing: 0, pitch: 0, padding: { top: 0 }, duration: 500 });
   }
 
   function tempoZoom() {
@@ -160,79 +158,136 @@
     return 17;
   }
 
-  // Punkt ein Stueck in Fahrtrichtung vor dem Auto - der wird zentriert,
-  // damit das Auto im unteren Drittel sitzt und vorn Karte zu sehen ist.
-  function vorausPunkt(ll, kurs, zoom) {
-    var mProPx = 156543.03392 * Math.cos(ll[0] * Math.PI / 180) / Math.pow(2, zoom);
-    var meter = mProPx * karte.getSize().y * 0.26;
-    var t = Math.PI / 180;
-    return [ll[0] + meter * Math.cos(kurs * t) / 111320,
-            ll[1] + meter * Math.sin(kurs * t) / (111320 * Math.cos(ll[0] * t))];
-  }
-
   function folgeAnsicht(ll) {
     if (!fahrmodus || kurs === null) {
-      karte.setView(ll, Math.max(karte.getZoom(), 16), { animate: true });
+      kamera({ center: m(ll), zoom: Math.max(karte.getZoom(), 16), duration: 800 });
       return;
     }
     var z = tempoZoom();
     if (z !== zoomStufe) zoomStufe = z; else z = karte.getZoom();
-    drehungSetzen(kurs);
-    karte.setView(vorausPunkt(ll, kurs, z), z, { animate: true });
+    kamera({
+      center: m(ll), zoom: z, bearing: kurs, pitch: 58,
+      // Innenabstand oben schiebt den Fokuspunkt nach unten - das Auto sitzt
+      // im unteren Drittel des SICHTBAREN Kartenausschnitts (die Bedienleiste
+      // unten verdeckt ~40 %; mehr als 0.12 schoebe den Punkt darunter).
+      padding: { top: Math.round(karte.getContainer().clientHeight * 0.12) },
+      duration: 950, easing: function (t) { return t; }
+    });
   }
 
-  /* ------------------------------------------------------------------- Karte */
+  /* ------------------------------------------------------------------- Karte */  /* ------------------------------------------------------------------- Karte */
   function kartenAufbau() {
-    karte = L.map('karte', {
-      zoomControl: false, attributionControl: true, tap: false, doubleClickZoom: false
-    }).setView([48.5216, 9.0576], 13);
-    kachelSetzen();
+    karte = new maplibregl.Map({
+      container: 'karte',
+      style: STILE[nacht ? 'nacht' : 'tag'].url,
+      center: [9.0576, 48.5216], zoom: 13,
+      attributionControl: { compact: true, customAttribution: QUELLE },
+      pitchWithRotate: false, dragRotate: false
+    });
+    karte.once('style.load', ebenenAnlegen);
 
-    // Langer Druck setzt das Ziel. Auf dem Handy gibt es kein Rechtsklick, und
-    // ein kurzer Tipp wäre zu leicht aus Versehen ausgelöst.
+    // Langer Druck setzt das Ziel - auf dem Handy gibt es kein Rechtsklick.
     var druckTimer = null;
-    karte.on('mousedown touchstart', function (e) {
-      var ll = e.latlng;
+    function druckStart(e) {
+      var p = [e.lngLat.lat, e.lngLat.lng];
       druckTimer = setTimeout(function () {
         druckTimer = null;
-        if (ll) zielSetzen(ll.lat, ll.lng, 'Kartenpunkt');
+        zielSetzen(p[0], p[1], 'Kartenpunkt');
       }, 550);
-    });
-    ['mouseup', 'touchend', 'mousemove', 'touchmove', 'zoomstart'].forEach(function (t) {
-      karte.on(t, function () { if (druckTimer) { clearTimeout(druckTimer); druckTimer = null; } });
+    }
+    function druckEnde() { if (druckTimer) { clearTimeout(druckTimer); druckTimer = null; } }
+    karte.on('mousedown', druckStart);
+    karte.on('touchstart', druckStart);
+    ['mouseup', 'touchend', 'mousemove', 'touchmove', 'zoomstart', 'dragstart'].forEach(function (t) {
+      karte.on(t, druckEnde);
     });
 
     karte.on('click', function (e) {
-      if (stoppmodus) { stoppmodus = false; knopfStand(); stoppHinzufuegen(e.latlng.lat, e.latlng.lng); }
-      else if (staumodus) {
+      if (stoppmodus) {
+        stoppmodus = false; knopfStand();
+        stoppHinzufuegen(e.lngLat.lat, e.lngLat.lng);
+      } else if (staumodus) {
         staumodus = false; knopfStand();
         sperreHinzufuegen({
-          ort: [e.latlng.lat, e.latlng.lng], radius: 220, minuten: 10,
+          ort: [e.lngLat.lat, e.lngLat.lng], radius: 220, minuten: 10,
           text: 'Stau von Hand', quelle: 'hand'
         });
-        // Neu rechnen muss hier stehen, nicht in sperreHinzufuegen: die
-        // Verkehrspruefung legt mehrere Sperren auf einmal an und rechnet
-        // danach ein einziges Mal neu.
         if (ziel) route(); else info('Stauzone gesetzt – jetzt das Ziel eingeben');
       }
     });
 
-    // Sobald der Nutzer die Karte selbst bewegt, hört das Folgen auf.
+    // Klick auf eine Sperrzone loescht sie
+    karte.on('click', 'sperr-flaeche', function (e) {
+      if (stoppmodus || staumodus) return;
+      var i = e.features && e.features[0] && e.features[0].properties.idx;
+      if (i != null && sperren[i]) sperreEntfernen(sperren[i]);
+    });
+
     karte.on('dragstart', function () { if (folgen) folgenSetzen(false); });
   }
 
-  function kachelSetzen() {
-    var k = KARTEN[nacht ? 'nacht' : 'tag'];
-    if (kachelLage) karte.removeLayer(kachelLage);
-    kachelLage = L.tileLayer(k.url, {
-      maxZoom: 20, subdomains: 'abcd', detectRetina: true, attribution: QUELLE
-    }).addTo(karte);
-    kachelLage.getContainer().style.filter = k.filter;
-    document.body.style.background = k.hg;
-    $('karte').style.background = k.hg;
+  // Nach jedem Stilwechsel muessen die eigenen Ebenen neu angelegt werden -
+  // setStyle wirft alles Fremde weg. Die Marker (DOM-Elemente) ueberleben.
+  function ebenenAnlegen() {
+    if (karte.getSource('routen')) return;
+    karte.addSource('routen', { type: 'geojson', data: leer() });
+    karte.addSource('sperrzonen', { type: 'geojson', data: leer() });
+
+    karte.addLayer({ id: 'route-neben', source: 'routen', type: 'line',
+      filter: ['==', ['get', 'art'], 'neben'],
+      paint: { 'line-color': '#8a929c', 'line-width': 4, 'line-opacity': .55, 'line-dasharray': [1.6, 1.8] },
+      layout: { 'line-cap': 'round', 'line-join': 'round' } });
+    karte.addLayer({ id: 'route-rand', source: 'routen', type: 'line',
+      filter: ['==', ['get', 'art'], 'haupt'],
+      paint: { 'line-color': nacht ? '#000' : '#fff', 'line-width': 11, 'line-opacity': .6 },
+      layout: { 'line-cap': 'round', 'line-join': 'round' } });
+    karte.addLayer({ id: 'route-haupt', source: 'routen', type: 'line',
+      filter: ['==', ['get', 'art'], 'haupt'],
+      paint: { 'line-color': '#1f6feb', 'line-width': 7 },
+      layout: { 'line-cap': 'round', 'line-join': 'round' } });
+
+    karte.addLayer({ id: 'sperr-flaeche', source: 'sperrzonen', type: 'fill',
+      paint: { 'fill-color': '#c82d2d', 'fill-opacity': .2 } });
+    karte.addLayer({ id: 'sperr-rand', source: 'sperrzonen', type: 'line',
+      paint: { 'line-color': '#c82d2d', 'line-width': 2, 'line-opacity': .85 } });
+
+    routenZeichnen();
+    sperrenZeichnen();
+  }
+  function leer() { return { type: 'FeatureCollection', features: [] }; }
+
+  function stilSetzen() {
+    var st = STILE[nacht ? 'nacht' : 'tag'];
+    document.body.style.background = st.hg;
+    $('karte').style.background = st.hg;
+    karte.setStyle(st.url);
+    karte.once('style.load', ebenenAnlegen);
   }
 
-  /* ---------------------------------------------------------------- Standort */
+  function routenZeichnen() {
+    if (!karte.getSource('routen')) return;
+    var fs = [];
+    varianten.forEach(function (v, j) {
+      fs.push({ type: 'Feature',
+        properties: { art: j === variante ? 'haupt' : 'neben' },
+        geometry: { type: 'LineString', coordinates: v.koord.map(m) } });
+    });
+    karte.getSource('routen').setData({ type: 'FeatureCollection', features: fs });
+    karte.setPaintProperty('route-rand', 'line-color', nacht ? '#000' : '#fff');
+  }
+
+  function sperrenZeichnen() {
+    if (!karte.getSource('sperrzonen')) return;
+    karte.getSource('sperrzonen').setData({
+      type: 'FeatureCollection',
+      features: sperren.map(function (sp, i) {
+        return { type: 'Feature', properties: { idx: i },
+                 geometry: { type: 'Polygon', coordinates: [kreisPolygon(sp.ort, sp.radius)] } };
+      })
+    });
+  }
+
+  /* ---------------------------------------------------------------- Standort */  /* ---------------------------------------------------------------- Standort */
   function standortStarten() {
     if (!navigator.geolocation) { info('Kein Standort verfügbar'); return; }
     navigator.geolocation.watchPosition(function (p) {
@@ -245,7 +300,7 @@
       tempoKmh = (p.coords.speed || 0) * 3.6;
       ichZeichnen(ll, p.coords.accuracy);
       if (folgen) {
-        if (erste) karte.setView(ll, 16);
+        if (erste) karte.jumpTo({ center: m(ll), zoom: 16 });
         else folgeAnsicht(ll);
       }
       if (erste && ziel) route();
@@ -262,32 +317,29 @@
     }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
   }
 
+  var kegelMarke = null;
   function ichZeichnen(ll, genauigkeit) {
     if (!ichMarke) {
-      ichMarke = L.marker(ll, {
-        icon: L.divIcon({
-          className: '', iconSize: [20, 20], iconAnchor: [10, 10],
-          html: '<div style="position:relative"><div class="ich-kegel"></div>' +
-                '<div class="ich-punkt"></div></div>'
-        }),
-        interactive: false, keyboard: false, zIndexOffset: 1000
-      }).addTo(karte);
-      ichKreis = L.circle(ll, {
-        radius: genauigkeit || 0, color: '#1f6feb', weight: 1,
-        opacity: .35, fillOpacity: .08, interactive: false
-      }).addTo(karte);
+      var kegelEl = document.createElement('div');
+      kegelEl.className = 'ich-kegel';
+      // rotationAlignment 'map': der Kegel zeigt die echte Himmelsrichtung
+      // und dreht mit der Karte mit - MapLibre uebernimmt das Rechnen.
+      kegelMarke = new maplibregl.Marker({
+        element: kegelEl, rotationAlignment: 'map', pitchAlignment: 'map', anchor: 'bottom'
+      }).setLngLat(m(ll)).addTo(karte);
+      var punktEl = document.createElement('div');
+      punktEl.className = 'ich-punkt';
+      ichMarke = new maplibregl.Marker({ element: punktEl, rotationAlignment: 'viewport' })
+        .setLngLat(m(ll)).addTo(karte);
     } else {
-      ichMarke.setLatLng(ll);
-      ichKreis.setLatLng(ll).setRadius(genauigkeit || 0);
+      ichMarke.setLngLat(m(ll));
+      kegelMarke.setLngLat(m(ll));
     }
-    var kegel = ichMarke.getElement() && ichMarke.getElement().querySelector('.ich-kegel');
-    if (kegel) {
-      kegel.style.display = kurs === null ? 'none' : 'block';
-      if (kurs !== null) kegel.style.transform = 'rotate(' + kurs + 'deg)';
-    }
+    kegelMarke.getElement().style.display = kurs === null ? 'none' : 'block';
+    if (kurs !== null) kegelMarke.setRotation(kurs);
   }
 
-  /* ------------------------------------------------------------ Zwischenziele */
+  /* ------------------------------------------------------------ Zwischenziele */  /* ------------------------------------------------------------ Zwischenziele */
   function stoppHinzufuegen(lat, lon, name) {
     stopps.push({ ort: [lat, lon], name: name || ('Stopp ' + (stopps.length + 1)) });
     stoppMarkenZeichnen();
@@ -300,14 +352,17 @@
     if (ziel) route();
   }
   function stoppMarkenZeichnen() {
-    stoppMarken.forEach(function (m) { karte.removeLayer(m); });
-    stoppMarken = stopps.map(function (s, i) {
-      return L.marker(s.ort, {
-        icon: L.divIcon({ className: '', iconSize: [26, 26], iconAnchor: [13, 13],
-                          html: '<div class="stopp-punkt">' + (i + 1) + '</div>' })
-      }).addTo(karte).on('click', function (e) { L.DomEvent.stop(e); stoppEntfernen(i); });
+    stoppMarken.forEach(function (mk) { mk.remove(); });
+    stoppMarken = stopps.map(function (sp, i) {
+      var el = document.createElement('div');
+      el.className = 'stopp-punkt';
+      el.textContent = i + 1;
+      el.onclick = function (e) { e.stopPropagation(); stoppEntfernen(i); };
+      return new maplibregl.Marker({ element: el, rotationAlignment: 'viewport' })
+        .setLngLat(m(sp.ort)).addTo(karte);
     });
   }
+
   function stoppListeZeichnen() {
     var l = $('stoppliste');
     if (!stopps.length) { l.hidden = true; return; }
@@ -331,7 +386,7 @@
   }
 
   function sperreHinzufuegen(s) {
-    var eintrag = {
+    sperren.push({
       ort: s.ort,
       radius: s.radius || 220,
       gewicht: gewichtAus(s.minuten || 0, s.hart),
@@ -339,39 +394,29 @@
       minuten: s.minuten || 0,
       text: s.text || 'Stau',
       quelle: s.quelle || 'hand'
-    };
-    eintrag.kreis = L.circle(s.ort, {
-      radius: eintrag.radius, color: '#c82d2d', weight: 2, opacity: .85,
-      fillColor: '#c82d2d', fillOpacity: eintrag.hart ? .3 : .18
-    }).bindTooltip(eintrag.text).addTo(karte);
-    eintrag.kreis.on('click', function (e) { L.DomEvent.stop(e); sperreEntfernen(eintrag); });
-    sperren.push(eintrag);
+    });
+    sperrenZeichnen();
     stoerfahne();
-    return eintrag;
+    return sperren[sperren.length - 1];
   }
 
   function sperreEntfernen(s) {
     var i = sperren.indexOf(s);
     if (i < 0) return;
-    karte.removeLayer(s.kreis);
     sperren.splice(i, 1);
+    sperrenZeichnen();
     stoerfahne();
     if (ziel) route();
   }
 
   function sperrenLeeren(nurQuelle) {
-    sperren.slice().forEach(function (s) {
-      if (!nurQuelle || s.quelle === nurQuelle) {
-        karte.removeLayer(s.kreis);
-        sperren.splice(sperren.indexOf(s), 1);
-      }
-    });
+    sperren = sperren.filter(function (sp) { return nurQuelle && sp.quelle !== nurQuelle; });
+    sperrenZeichnen();
     stoerfahne();
   }
 
-  // Sichtbar machen, wenn nur der Ersatzdienst laeuft. Sonst wundert man
-  // sich, warum ploetzlich die drei Vorschlaege fehlen und keine Umfahrung
-  // mehr greift - genau das ist im Betrieb passiert.
+  // Sichtbar machen, wenn nur der Ersatzdienst laeuft - sonst wundert man
+  // sich, warum die drei Vorschlaege fehlen und keine Umfahrung greift.
   function ersatzfahne(an, grund) {
     var f = $('ersatzfahne');
     f.hidden = !an;
@@ -471,20 +516,19 @@
 
   /* ------------------------------------------------------------------ Blitzer */
   function blitzerZeichnen() {
-    blitzMarken.forEach(function (m) { karte.removeLayer(m); });
+    blitzMarken.forEach(function (mk) { mk.remove(); });
     blitzMarken = [];
     if (!blitzWarnen) return;
     blitzer.forEach(function (b) {
-      blitzMarken.push(L.marker(b.ort, {
-        icon: L.divIcon({ className: '', iconSize: [22, 22], iconAnchor: [11, 11],
-                          html: '<div class="blitz-punkt' + (b.mobil ? ' mobil' : '') + '">' +
-                                (b.tempo || '!') + '</div>' }),
-        interactive: false
-      }).addTo(karte));
+      var el = document.createElement('div');
+      el.className = 'blitz-punkt' + (b.mobil ? ' mobil' : '');
+      el.textContent = b.tempo || '!';
+      blitzMarken.push(new maplibregl.Marker({ element: el, rotationAlignment: 'viewport' })
+        .setLngLat(m(b.ort)).addTo(karte));
     });
   }
 
-  // Warnt nur vor Blitzern, auf die man wirklich zufährt. OSM hält bei vielen
+  // Warnt nur vor Blitzern  // Warnt nur vor Blitzern, auf die man wirklich zufährt. OSM hält bei vielen
   // Standorten die Messrichtung fest; wo sie fehlt, wird über den Kurs
   // entschieden, um Gegenrichtungs-Fehlalarme zu vermeiden.
   function blitzPruefen(ll) {
@@ -548,11 +592,12 @@
   function zielSetzen(lat, lon, name) {
     ziel = [lat, lon];
     zielName = name || '';
-    if (zielMarke) karte.removeLayer(zielMarke);
-    zielMarke = L.marker(ziel, {
-      icon: L.divIcon({ className: '', iconSize: [34, 34], iconAnchor: [17, 30],
-                        html: '<div class="ziel-punkt">🏁</div>' })
-    }).addTo(karte);
+    if (zielMarke) zielMarke.remove();
+    var zEl = document.createElement('div');
+    zEl.className = 'ziel-punkt';
+    zEl.textContent = '🏁';
+    zielMarke = new maplibregl.Marker({ element: zEl, rotationAlignment: 'viewport', anchor: 'bottom' })
+      .setLngLat(m(ziel)).addTo(karte);
     $('suche').value = (name || '').split(',')[0];
     $('suche-loeschen').hidden = false;
     if (name && name !== 'Kartenpunkt') zielMerken(name.split(',')[0], lat, lon);
@@ -571,10 +616,8 @@
   function zielLoeschen() {
     ziel = null; zielName = ''; varianten = []; hinweise = [];
     routePunkte = []; routeRefs = []; blitzer = [];
-    if (zielMarke) { karte.removeLayer(zielMarke); zielMarke = null; }
-    if (linie) { karte.removeLayer(linie); linie = null; }
-    nebenlinien.forEach(function (l) { karte.removeLayer(l); });
-    nebenlinien = [];
+    if (zielMarke) { zielMarke.remove(); zielMarke = null; }
+    routenZeichnen();
     blitzerZeichnen();
     sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic');
     $('varianten').hidden = true;
@@ -845,21 +888,7 @@
     var v = varianten[i];
     if (!v) return;
 
-    nebenlinien.forEach(function (l) { karte.removeLayer(l); });
-    nebenlinien = [];
-    if (linie) { karte.removeLayer(linie); linie = null; }
-    varianten.forEach(function (a, j) {
-      if (j === i) return;
-      nebenlinien.push(L.polyline(a.koord, {
-        color: '#8a929c', weight: 4, opacity: .5, dashArray: '6 7', interactive: false
-      }).addTo(karte));
-    });
-    // Rand darunter, damit die Route auf hellem wie dunklem Grund trägt
-    nebenlinien.push(L.polyline(v.koord, {
-      color: nacht ? '#000' : '#fff', weight: 10, opacity: .55, interactive: false
-    }).addTo(karte));
-    linie = L.polyline(v.koord, { color: '#1f6feb', weight: 6, opacity: .95, interactive: false })
-             .addTo(karte);
+    routenZeichnen();
 
     routePunkte = v.koord;
     kumWeg = [0];
@@ -1176,7 +1205,7 @@
     fahrmodusAnwenden();
     if (an && standort) {
       if (fahrmodus && kurs !== null) folgeAnsicht(standort);
-      else karte.setView(standort, Math.max(karte.getZoom(), 16));
+      else karte.easeTo({ center: m(standort), zoom: Math.max(karte.getZoom(), 16) });
     }
   }
   function sheetZeigen(an) {
@@ -1205,8 +1234,15 @@
     };
 
     $('k-uebersicht').onclick = function () {
-      if (linie) { folgenSetzen(false); karte.fitBounds(linie.getBounds(), { padding: [40, 40] }); }
-      else if (standort) karte.setView(standort, 15);
+      if (routePunkte.length) {
+        folgenSetzen(false);
+        var b = new maplibregl.LngLatBounds();
+        routePunkte.forEach(function (p) { b.extend(m(p)); });
+        sperren.forEach(function (sp) { b.extend(m(sp.ort)); });
+        karte.fitBounds(b, { padding: 60, bearing: 0, pitch: 0, duration: 700 });
+      } else if (standort) {
+        karte.easeTo({ center: m(standort), zoom: 15 });
+      }
     };
 
     $('k-mehr').onclick = function () { sheetZeigen(true); };
@@ -1218,8 +1254,7 @@
       $('s-nacht').textContent = nacht ? 'an' : 'aus';
       schalter('s-nacht', nacht);
       merken('nacht', nacht ? '1' : '0');
-      kachelSetzen();
-      if (varianten.length) variantenWaehlen(variante);
+      stilSetzen();
     };
 
     $('s-blitzer').onclick = function () {
@@ -1355,6 +1390,14 @@
       refs: function () { return routeRefs; },
       varianten: function () { return varianten; },
       verkehrPruefen: verkehrPruefen,
+      zielSetzen: zielSetzen,
+      stauSetzen: function (lat, lon) {
+        sperreHinzufuegen({ ort: [lat, lon], radius: 220, minuten: 10,
+                            text: 'Stau von Hand', quelle: 'hand' });
+        if (ziel) route();
+      },
+      zustand: function () { return { fahrmodus: fahrmodus, folgen: folgen,
+        zielDa: !!ziel, kurs: kurs, tempo: Math.round(tempoKmh) }; },
       profil: function () { return profilId; }
     };
   }

@@ -10,12 +10,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Staufunk">
-  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=13">
+  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=14">
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <link rel="manifest" href="manifest.json">
   <title>Staufunk</title>
-  <link rel="stylesheet" href="leaflet/leaflet.css?v=13">
-  <link rel="stylesheet" href="stil.css?v=13">
+  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=14">
+  <link rel="stylesheet" href="stil.css?v=14">
 </head>
 <body>
 
@@ -38,13 +38,13 @@
     <div id="stoerfahne" hidden></div>
   </div>
 
-  <!-- Eigenes Tempo + Limit, unten rechts ueber der Leiste -->
-  <div id="tempoecke" hidden>
-    <div id="tempojetzt">–</div>
-    <div id="temposchild" hidden>50</div>
-  </div>
-
   <div id="unten">
+    <!-- Tempo + Limit: als Kind der Leiste sitzt die Ecke immer direkt
+         darueber, egal wie hoch die Leiste gerade ist -->
+    <div id="tempoecke" hidden>
+      <div id="tempojetzt">–</div>
+      <div id="temposchild" hidden>50</div>
+    </div>
     <div id="suchzeile">
       <input id="suche" type="search" placeholder="Ziel eingeben" autocomplete="off"
              autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
@@ -125,11 +125,11 @@
     </div>
   </div>
 
-  <script src="leaflet/leaflet.js?v=13"></script>
-  <script src="verkehr.js?v=13"></script>
+  <script src="vendor/maplibre/maplibre-gl.js?v=14"></script>
+  <script src="verkehr.js?v=14"></script>
   <!-- tut nichts, ausser die Adresse enthaelt ?pruefstand -->
-  <script src="pruefstand.js?v=13"></script>
-  <script src="app.js?v=13"></script>
+  <script src="pruefstand.js?v=14"></script>
+  <script src="app.js?v=14"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {
