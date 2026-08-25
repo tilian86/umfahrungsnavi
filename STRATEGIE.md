@@ -76,7 +76,8 @@ damit die Entscheidung pro Route bewusst fällt statt unbemerkt.
 | Kartenbilder | CARTO Voyager (Tag) / Dark Matter (Nacht) | frei |
 | Routing | **BRouter**, öffentlicher Dienst, Profil `car-fast` | frei |
 | Sperrzonen | BRouter-Parameter `nogos` | frei |
-| Verkehrsdaten | **TomTom Traffic Incidents API** | 2.500 Abrufe/Monat frei |
+| Verkehr Autobahn | **Autobahn GmbH des Bundes** (INRIX) | frei, ohne Schlüssel |
+| Verkehr sonst | **TomTom Flow Segment Data** | 2.500 Abrufe/Monat frei |
 | Adresssuche | Nominatim | frei |
 
 **Warum BRouter und nicht OSRM/GraphHopper:** BRouter läuft als öffentlicher
@@ -157,41 +158,36 @@ ohne Adressleiste — genau das, was beim Roller nicht ging.
 
 ---
 
-## 7. Vorgehen in Etappen
+## 7. Stand
 
-**Etappe 1 — Grundgerüst. ✅ fertig, 25.08.2026.**
-Karte (Tag/Nacht), Standort mit Richtungskegel, Adresssuche, Ziel per langem
-Druck, Routing mit drei Varianten, Abbiegebanner, Sprachansage, Neuberechnung
-bei Abweichung, Vollbild-PWA. Dazu bereits die Sperrzonen-Mechanik von Hand
-(„Stau hier") — damit ist der Kern des Vorhabens heute schon vorführbar.
+**Etappe 1 — Grundgerüst. ✅ 25.08.2026.** Karte Tag/Nacht, Standort mit
+Richtungskegel, Adresssuche, Ziel per langem Druck, drei Routenvarianten,
+Abbiegebanner, Sprachansage, Neuberechnung, Vollbild-PWA.
 
-**Etappe 2 — Verkehr sichtbar.** TomTom-Konto, Störungen und Stauflächen auf
-der Karte einfärben. Noch ohne Einfluss auf die Route.
+**Etappe 2 + 3 — Verkehr und automatische Umfahrung. ✅ 25.08.2026.**
+Autobahn-GmbH-Schnittstelle und TomTom Flow, Schwelle einstellbar (Vorgabe
+5 Minuten), Sperrgewicht aus dem gemeldeten Zeitverlust, Richtungsfilter,
+Prüfung alle drei Minuten während der Fahrt.
 
-**Etappe 3 — automatische Umfahrung.** TomTom-Störungen entlang der Route
-abfragen und in die vorhandene `sperren`-Liste schreiben. Schwellenwert, ab
-wann eine Störung eine Zone wird. Wiederholung während der Fahrt.
+**Zusätzlich fertig:** Zwischenziele, Ankunftszeit, Blitzwarner,
+Kreisverkehr-Ausfahrten, Verkettung dicht aufeinanderfolgender Abbiegungen.
 
-**Etappe 4 — Feinschliff.** Tempolimits (stehen bereits in BRouters Antwort),
-Spurhinweise, Ansagen verbessern, gefahrene Strecken aufzeichnen.
+**Offen:** Tempolimit-Anzeige (die Daten liegen schon in BRouters Antwort),
+Spurhinweise, Aufzeichnung gefahrener Strecken.
 
 ---
 
-## 8. Offene Entscheidungen
+## 8. Entschieden
 
-1. **Wie aggressiv?** → jetzt eine Zahl: `SPERRGEWICHT` in `app.js`,
-   Voreinstellung 4000 (≈ 4 km Umweg werden in Kauf genommen).
-   Zu entscheiden bleibt, ab welcher gemeldeten Verzögerung (5 min? 10 min?)
-   eine TomTom-Störung überhaupt zur Sperrzone wird.
-2. **„Anlieger frei" respektieren oder ignorieren?** Voreinstellung ist
-   ignorieren (so verhält sich `car-fast`). Die App weist den Anteil aus.
-   → deine Entscheidung.
-3. **Reicht BRouter?** → geprüft: ja. Sperrzonen, Alternativrouten,
-   Abbiegehinweise, Profilparameter und sogar eigene Profile laufen über den
-   öffentlichen Dienst. Kein eigener Server nötig.
-4. **Tempolimits?** → fällt praktisch ab: BRouter liefert `maxspeed` je
-   Abschnitt in `messages` mit. Nur die Anzeige fehlt noch.
-5. **Aufzeichnung gefahrener Strecken?** → noch offen.
+1. **Wie aggressiv?** Umfahren ab 5 Minuten Zeitverlust; einstellbar von 3 bis
+   15. Das Sperrgewicht wächst mit dem gemeldeten Verlust (800 m je Minute),
+   damit ein dicker Stau die Route stärker verbiegt als ein kleiner.
+2. **„Anlieger frei"** bleibt erlaubt — so verhält sich `car-fast` von Haus
+   aus. Die App weist den Anteil je Variante aus.
+3. **BRouter reicht.** Sperrzonen, Alternativrouten, Abbiegehinweise,
+   Profilparameter und eigene Profile laufen über den öffentlichen Dienst.
+4. **Tempolimits** stecken schon in `messages`; nur die Anzeige fehlt.
+5. **Aufzeichnung** noch offen.
 
 ---
 
@@ -229,3 +225,30 @@ Alles gegen `https://brouter.de` gemessen, Strecke Tübingen (9.0576, 48.5216)
 | `pruefung.html` | **Prüfstand**: täuscht GPS vor und fährt die Route ab — ohne den geht am Schreibtisch gar nichts |
 | `sw.js` | Service Worker; **Versionsnummer bei jeder Änderung hochzählen** |
 | `profil/car-fast-original.brf` | BRouters Auto-Profil als Ausgangspunkt für Etappe 4 |
+
+---
+
+## 11. Nachtrag 25.08.2026: wie aggressiv ist es wirklich?
+
+Gemessen an einer Tübinger Innenstadtstrecke (Südstadt → Waldhäuser Ost) mit
+gesperrter Hauptachse:
+
+| | Länge | Dauer | kleine Straßen |
+|---|---|---|---|
+| ohne Stau | 7,58 km | 15 min | 0,82 km (11 %) |
+| Hauptachse gesperrt | 6,03 km | 17 min | 2,41 km (**40 %**) |
+
+Er taucht also wirklich ins Wohngebiet ab, sobald die Hauptstraße teuer wird.
+
+Der Versuch, das über ein höher gerechnetes Wohnstraßen-Tempo noch weiter zu
+treiben, läuft ins Leere: in deutschen Wohngebieten steht fast überall
+`maxspeed=30` in den Kartendaten, und das begrenzt die Rechnung hart. Deshalb
+gibt es im eigenen Profil zusätzlich `schleichfaktor` — der hebt das gerechnete
+Tempo auf kleinen Straßen an. Voreinstellung 1.0, also legal gerechnet; höhere
+Werte machen die Route schleichfreudiger, lohnen sich aber nur, wenn man das
+Tempolimit überschreitet.
+
+**Der wirksame Hebel ist nicht die Wohnstraße, sondern der Stau.** Solange
+BRouter die verstopfte Bundesstraße mit 100 km/h rechnet, ist der Vergleich
+zugunsten der Hauptstraße verzerrt. Genau das korrigiert das aus dem
+Zeitverlust gerechnete Sperrgewicht.
