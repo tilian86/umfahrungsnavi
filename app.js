@@ -76,6 +76,7 @@
   var abseitsZaehler = 0, letzteNeu = 0, laeuft = 0;
   var vorschlagTimer = null, letzteSuche = 0;
   var verkehrTimer = null, letzterVerkehr = 0, verkehrLaeuft = false;
+  var schleichErzwingen = false;
   var fahrmodus = false, drehung = 0, zoomStufe = 0, tempoKmh = 0;
   var kumWeg = [], limits = [], limitAktuell = null, limitGesagt = null;
   var verkehrKarteAn = true;
@@ -476,6 +477,33 @@
     }).join('|');
   }
 
+  /* ------------------------------------------------------- Sofort ausweichen */
+  // Fuer den Moment, in dem man IM Stau steht, den keine Quelle meldet:
+  // legt zwei enge Sperren auf die eigene Route direkt voraus und rechnet
+  // neu - diesmal mit erzwungenem Schleichweg-Vorschlag, egal wie lang die
+  // Fahrt ist. Kein Warten auf TomTom oder Meldungen.
+  function ausweichen() {
+    if (!ziel || !routePunkte.length || !standort) { info('Erst ein Ziel setzen'); return; }
+    // Nochmal gedrueckt = neue Lage: alte Vor-mir-Sperren ersetzen, nicht stapeln
+    sperren = sperren.filter(function (sp) { return sp.text !== 'Stau vor mir'; });
+    sperrenZeichnen();
+    var idx = routenIndex(standort);
+    var abHier = kumWeg[idx];
+    [300, 900].forEach(function (voraus) {
+      for (var i = idx; i < routePunkte.length; i++) {
+        if (kumWeg[i] - abHier >= voraus) {
+          sperreHinzufuegen({ ort: routePunkte[i], radius: 200, minuten: 10,
+                              text: 'Stau vor mir', quelle: 'hand' });
+          return;
+        }
+      }
+    });
+    schleichErzwingen = true;
+    if (sprache) { letzterText = ''; sagen('Weiche aus'); }
+    info('Weiche aus – suche Nebenstraßen …');
+    route();
+  }
+
   /* ------------------------------------------------------------------ Verkehr */
   function verkehrPruefen(stillschweigend) {
     if (modus === 'rad') return;         // Stau interessiert das Rad nicht
@@ -684,7 +712,7 @@
         { zusatz: '&alternativeidx=0&profile:avoid_motorways=1', marke: '' }
       ];
       if (radfahrt) kandidaten = kandidaten.slice(0, 3);   // Autobahn-Variante sinnlos
-      if (!radfahrt && stadtmodusGilt(punkte)) {
+      if (!radfahrt && (stadtmodusGilt(punkte) || schleichErzwingen)) {
         kandidaten.push({
           zusatz: '&alternativeidx=0&profile:vmax=' + STADT_VMAX, marke: 'Schleichweg'
         });
@@ -763,11 +791,13 @@
   // genau der Vorschlag ist, um den es geht.
   function auswaehlen(liste) {
     var schnellste = liste[0] ? liste[0].min : 0;
+    var grenze = schleichErzwingen ? 2.5 : 1.6;
+    schleichErzwingen = false;
     // Einen Schleichweg, der fast doppelt so lange dauert, will niemand -
     // das passiert auf Strecken mit viel Schnellstrasse, wo das gedeckelte
     // Rechentempo die ganze Route ausbremst statt nur den Stau zu umgehen.
     liste = liste.filter(function (v) {
-      return !v.marke || !schnellste || v.min <= schnellste * 1.6;
+      return v.marke !== 'Schleichweg' || !schnellste || v.min <= schnellste * grenze;
     });
     var raus = liste.slice(0, 3);
     if (raus.some(function (v) { return v.marke; })) return raus;
@@ -908,11 +938,12 @@
     varianten.forEach(function (v, i) {
       var b = document.createElement('button');
       var etikett = v.marke ? v.marke
-                  : (v === schnellste ? 'schnell' : (v === kuerzeste ? 'kurz' : ''));
+                  : (v === schnellste ? 'schnell' : (v === kuerzeste ? 'kurz' : 'Alternative'));
+      // Immer eine Zusatzzeile - sonst sind die Kacheln verschieden hoch und
+      // die dritte wirkt unfertig
       var zusatz = modus === 'rad'
         ? '<br><span class="klein">' + (v.auf || 0) + ' m ↑</span>'
-        : (v.art.wohn > 400
-            ? '<br><span class="klein">' + (v.art.wohn / 1000).toFixed(1) + ' km klein</span>' : '');
+        : '<br><span class="klein">' + (v.art.wohn / 1000).toFixed(1) + ' km klein</span>';
       b.innerHTML = (etikett ? '<b>' + etikett + '</b><br>' : '') +
                     v.min + ' min<br>' + uhrzeit(v.min) + '<br>' +
                     v.km.toFixed(1) + ' km' + zusatz;
@@ -1377,6 +1408,8 @@
       info(stoppmodus ? 'Zwischenziel: auf die Karte tippen oder oben eintippen' : 'Abgebrochen');
       if (stoppmodus) $('suche').value = '';
     };
+
+    $('k-stau').onclick = ausweichen;
 
     $('k-uebersicht').onclick = function () {
       if (routePunkte.length) {

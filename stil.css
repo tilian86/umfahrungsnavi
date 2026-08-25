@@ -114,7 +114,7 @@ html, body {
 
 #knoepfe { display: flex; gap: 7px; }
 #knoepfe button {
-  flex: 1; padding: 11px 3px; border-radius: 11px;
+  flex: 1; padding: 11px 2px; border-radius: 11px; min-width: 0;
   border: 1px solid rgba(255,255,255,.14);
   background: rgba(38,44,52,.95); color: #f2f4f6;
   font-size: 12.5px; font-family: inherit;
