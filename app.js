@@ -81,6 +81,7 @@
   var kumWeg = [], limits = [], limitAktuell = null, limitGesagt = null;
   var verkehrKarteAn = true;
   var modus = 'auto';                    // 'auto' | 'rad'
+  var feldwegeFrei = false, schotterOk = false;
 
   function $(id) { return document.getElementById(id); }
   var infoStand = 0;
@@ -624,7 +625,7 @@
   // Das eigene Profil wird beim ersten Start zu BRouter hochgeladen und die
   // Kennung gemerkt. BRouter räumt hochgeladene Profile irgendwann weg -
   // deshalb bei einem Fehlschlag einmal neu hochladen.
-  var PROFIL_VERSION = '2';   // bei jeder Aenderung an umfahrung.brf hochzaehlen
+  var PROFIL_VERSION = '3';   // bei jeder Aenderung an umfahrung.brf hochzaehlen
   function profilBesorgen(erzwingen) {
     var gemerkt = geholt('profilid', '');
     if (geholt('profilv', '') !== PROFIL_VERSION) { gemerkt = ''; merken('profilv', PROFIL_VERSION); }
@@ -722,9 +723,14 @@
           zusatz: '&alternativeidx=1&profile:vmax=' + STADT_VMAX, marke: 'Schleichweg'
         });
       }
+      // Wege-Schalter nur im Auto-Modus - das trekking-Profil kennt die
+      // Parameter nicht und BRouter bricht bei unbekannten Namen ab
+      var wege = radfahrt ? '' :
+        (feldwegeFrei ? '&profile:feldwege_frei=1' : '') +
+        (schotterOk ? '&profile:schotter_ok=1' : '');
       var anfragen = kandidaten.map(function (k) {
         return fetch(BROUTER + '?lonlats=' + ll + '&profile=' + prof +
-                     '&format=geojson&timode=2' + k.zusatz + nogos)
+                     '&format=geojson&timode=2' + k.zusatz + wege + nogos)
           .then(function (r) {
             if (!r.ok) {
               // 403 ist BRouters eigene Drosselung ("Please, retry later!"),
@@ -1449,12 +1455,29 @@
     $('s-modus').onclick = function () {
       modus = modus === 'auto' ? 'rad' : 'auto';
       $('s-modus').textContent = modus === 'auto' ? '🚗 Auto' : '🚲 Rad';
+    schalter('s-feldwege', feldwegeFrei); $('s-feldwege').textContent = feldwegeFrei ? 'an' : 'aus';
+    schalter('s-schotter', schotterOk);   $('s-schotter').textContent = schotterOk ? 'an' : 'aus';
       merken('modus', modus);
       if (modus === 'rad') { sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic'); }
       blitzerZeichnen();
       if (ziel) route();
       info(modus === 'rad' ? 'Fahrradmodus – ohne Stau, Blitzer und Tempolimits'
                            : 'Automodus');
+    };
+
+    $('s-feldwege').onclick = function () {
+      feldwegeFrei = !feldwegeFrei;
+      $('s-feldwege').textContent = feldwegeFrei ? 'an' : 'aus';
+      schalter('s-feldwege', feldwegeFrei);
+      merken('feldwege', feldwegeFrei ? '1' : '0');
+      if (ziel) route();
+    };
+    $('s-schotter').onclick = function () {
+      schotterOk = !schotterOk;
+      $('s-schotter').textContent = schotterOk ? 'an' : 'aus';
+      schalter('s-schotter', schotterOk);
+      merken('schotter', schotterOk ? '1' : '0');
+      if (ziel) route();
     };
 
     $('s-verkehrkarte').onclick = function () {
@@ -1552,6 +1575,8 @@
     verkehrAn   = geholt('verkehr', '1') === '1';
     verkehrKarteAn = geholt('verkehrkarte', '1') === '1';
     modus = geholt('modus', 'auto');
+    feldwegeFrei = geholt('feldwege', '0') === '1';
+    schotterOk   = geholt('schotter', '0') === '1';
     sprache     = geholt('sprache', '0') === '1';
     schwelle    = parseInt(geholt('schwelle', '5'), 10) || 5;
     stadtmodus  = geholt('stadt', 'auto');
@@ -1576,6 +1601,8 @@
     schalter('s-verkehr', verkehrAn);   $('s-verkehr').textContent = verkehrAn ? 'an' : 'aus';
     schalter('s-verkehrkarte', verkehrKarteAn); $('s-verkehrkarte').textContent = verkehrKarteAn ? 'an' : 'aus';
     $('s-modus').textContent = modus === 'auto' ? '🚗 Auto' : '🚲 Rad';
+    schalter('s-feldwege', feldwegeFrei); $('s-feldwege').textContent = feldwegeFrei ? 'an' : 'aus';
+    schalter('s-schotter', schotterOk);   $('s-schotter').textContent = schotterOk ? 'an' : 'aus';
     $('s-schwelle').value = String(schwelle);
     $('s-stadt').value = stadtmodus;
     $('s-tomtom').value = tomtomKey;

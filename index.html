@@ -10,12 +10,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Staufunk">
-  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=18">
+  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=19">
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <link rel="manifest" href="manifest.json">
   <title>Staufunk</title>
-  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=18">
-  <link rel="stylesheet" href="stil.css?v=18">
+  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=19">
+  <link rel="stylesheet" href="stil.css?v=19">
 </head>
 <body>
 
@@ -94,6 +94,19 @@
       <button id="s-verkehrkarte" class="an">an</button>
     </div>
 
+    <div class="reihe">
+      <span>Gute Schotterwege mitplanen</span>
+      <button id="s-schotter">aus</button>
+    </div>
+    <div class="reihe">
+      <span>Wirtschaftswege („Agrar frei")</span>
+      <button id="s-feldwege">aus</button>
+    </div>
+    <small class="hinweis">Wirtschaftswege mit „landwirtschaftlicher Verkehr
+      frei" sind für Pkw nicht freigegeben – die Nutzung ist deine
+      Entscheidung. Schotterwege werden mit 15–18 km/h eingeplant und nur
+      gewählt, wenn sie wirklich abkürzen.</small>
+
     <label class="feld">
       Ab wie viel Zeitverlust umfahren?
       <select id="s-schwelle">
@@ -135,11 +148,11 @@
     </div>
   </div>
 
-  <script src="vendor/maplibre/maplibre-gl.js?v=18"></script>
-  <script src="verkehr.js?v=18"></script>
+  <script src="vendor/maplibre/maplibre-gl.js?v=19"></script>
+  <script src="verkehr.js?v=19"></script>
   <!-- tut nichts, ausser die Adresse enthaelt ?pruefstand -->
-  <script src="pruefstand.js?v=18"></script>
-  <script src="app.js?v=18"></script>
+  <script src="pruefstand.js?v=19"></script>
+  <script src="app.js?v=19"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {

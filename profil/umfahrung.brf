@@ -46,6 +46,16 @@ assign nebentempo = 50 # %nebentempo% | Rechentempo Nebenstrassen (km/h) | numbe
 # 1.0 = legal gerechnet (Voreinstellung). Groessere Werte rechnen kleine
 # Strassen schneller, als dort erlaubt ist; die Route wird dadurch schleich-
 # freudiger, lohnt sich aber nur, wenn man das Tempolimit ueberschreitet.
+# Beide standardmaessig AUS und nur bewusst zuschaltbar:
+# feldwege_frei nutzt auch Wege mit "landwirtschaftlicher Verkehr frei" -
+# fuer Pkw rechtlich nicht erlaubt, Entscheidung des Fahrers.
+# schotter_ok plant gute Schotterwege (grade2, compacted/gravel) mit ein,
+# gerechnet mit 18 km/h. ("forestry" kennt BRouters Woerterbuch nicht -
+# deshalb nur agricultural; Kombiwerte wie "agricultural;forestry" matcht
+# BRouter ohnehin nicht.)
+assign feldwege_frei = false # %feldwege_frei% | Auch Wirtschaftswege (Agrar frei) | boolean
+assign schotter_ok   = false # %schotter_ok% | Gute Schotterwege mitplanen | boolean
+
 assign schleichfaktor = 1.0 # %schleichfaktor% | Schleichweg-Bereitschaft (1.0 = legal) | number
 # --------------------------------------------------------------------------
 assign recup_efficiency = 0.7    # %recup_efficiency% | (ratio) | number
@@ -90,17 +100,20 @@ assign caraccess
                                    switch highway=unclassified                 1
                                    switch and highway=track
                                           or use_offroad
-                                             or tracktype=grade1
-                                                surface=asphalt|paved|concrete|paving_stones 1
+                                             or ( and schotter_ok
+                                                  or tracktype=grade2
+                                                     surface=compacted|gravel|fine_gravel|pebblestone )
+                                                or tracktype=grade1
+                                                   surface=asphalt|paved|concrete|paving_stones 1
                                    switch and highway=road use_offroad         1
                                    switch route=ferry                          1
                                    switch isresidentialorliving                1
                                    switch highway=service                      1
                                    0
-                                   access=yes|permissive|designated|destination
-                            vehicle=yes|designated|destination
-                     motor_vehicle=yes|permissive|designated|destination
-              motorcar=yes|permissive|designated|destination
+                                   switch feldwege_frei access=yes|permissive|designated|destination|agricultural access=yes|permissive|designated|destination
+                            switch feldwege_frei vehicle=yes|designated|destination|agricultural vehicle=yes|designated|destination
+                     switch feldwege_frei motor_vehicle=yes|permissive|designated|destination|agricultural motor_vehicle=yes|permissive|designated|destination
+              switch feldwege_frei motorcar=yes|permissive|designated|destination|agricultural motorcar=yes|permissive|designated|destination
 
 assign caraccess_destination
        switch motorcar=
@@ -139,13 +152,16 @@ assign islinktype = highway=motorway_link|trunk_link|primary_link|secondary_link
 assign maxspeed_surface =
   switch or surface= surface=paved|asphalt|concrete 999
   switch surface=paving_stones|cobblestone|sett 30
-  switch surface=fine_gravel ( switch avoid_unpaved 3 10 )
+  switch surface=fine_gravel ( switch avoid_unpaved 3 ( switch schotter_ok 20 10 ) )
+  switch and schotter_ok surface=compacted|gravel|pebblestone 18
   switch avoid_unpaved 1 2
 
 assign maxspeed_tracktype =
   switch tracktype= 999
   switch tracktype=grade1 40
-  switch tracktype=grade2 ( switch avoid_unpaved 2 5 )
+  switch tracktype=grade2 ( switch avoid_unpaved 2 ( switch schotter_ok 18 5 ) )
+  switch and schotter_ok
+         and tracktype=grade3 surface=compacted|gravel|fine_gravel|pebblestone 15
   1
 
 assign maxspeed_implicit =
@@ -164,7 +180,9 @@ assign maxspeed_implicit =
   switch isresidentialorliving              wohntempo
   switch highway=service                    wohntempo
   switch highway=track|road|path
-    switch or tracktype=grade1 surface=asphalt|paved|concrete|paving_stones 30 5
+    switch or tracktype=grade1 surface=asphalt|paved|concrete|paving_stones 30
+    switch and schotter_ok
+           or tracktype=grade2 surface=compacted|gravel|fine_gravel|pebblestone 18 5
   0
 
 assign maxspeed_forward =
@@ -334,10 +352,10 @@ assign caraccess
                      switch vehicle=
                             switch access=
                                    not barrier=gate|bollard|lift_gate|cycle_barrier
-                                   access=yes|permissive|designated|destination
-                            vehicle=yes|permissive|designated|destination
-                     motor_vehicle=yes|permissive|designated|destination
-              motorcar=yes|permissive|designated|destination
+                                   switch feldwege_frei access=yes|permissive|designated|destination|agricultural access=yes|permissive|designated|destination
+                            switch feldwege_frei vehicle=yes|permissive|designated|destination|agricultural vehicle=yes|permissive|designated|destination
+                     switch feldwege_frei motor_vehicle=yes|permissive|designated|destination|agricultural motor_vehicle=yes|permissive|designated|destination
+              switch feldwege_frei motorcar=yes|permissive|designated|destination|agricultural motorcar=yes|permissive|designated|destination
 
 assign initialcost =
        switch and avoid_toll barrier=toll_booth 1000000
