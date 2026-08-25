@@ -10,12 +10,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Staufunk">
-  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=14">
+  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=15">
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <link rel="manifest" href="manifest.json">
   <title>Staufunk</title>
-  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=14">
-  <link rel="stylesheet" href="stil.css?v=14">
+  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=15">
+  <link rel="stylesheet" href="stil.css?v=15">
 </head>
 <body>
 
@@ -28,6 +28,7 @@
       <div id="banner-entfernung">–</div>
       <div id="banner-anweisung">–</div>
       <div id="banner-danach" hidden></div>
+      <div id="banner-spuren" hidden></div>
     </div>
   </div>
 
@@ -83,6 +84,10 @@
       <span>Stau automatisch umfahren</span>
       <button id="s-verkehr" class="an">an</button>
     </div>
+    <div class="reihe">
+      <span>Verkehrslage auf der Karte</span>
+      <button id="s-verkehrkarte" class="an">an</button>
+    </div>
 
     <label class="feld">
       Ab wie viel Zeitverlust umfahren?
@@ -125,11 +130,11 @@
     </div>
   </div>
 
-  <script src="vendor/maplibre/maplibre-gl.js?v=14"></script>
-  <script src="verkehr.js?v=14"></script>
+  <script src="vendor/maplibre/maplibre-gl.js?v=15"></script>
+  <script src="verkehr.js?v=15"></script>
   <!-- tut nichts, ausser die Adresse enthaelt ?pruefstand -->
-  <script src="pruefstand.js?v=14"></script>
-  <script src="app.js?v=14"></script>
+  <script src="pruefstand.js?v=15"></script>
+  <script src="app.js?v=15"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {

@@ -78,6 +78,7 @@
   var verkehrTimer = null, letzterVerkehr = 0, verkehrLaeuft = false;
   var fahrmodus = false, drehung = 0, zoomStufe = 0, tempoKmh = 0;
   var kumWeg = [], limits = [], limitAktuell = null, limitGesagt = null;
+  var verkehrKarteAn = true;
 
   function $(id) { return document.getElementById(id); }
   var infoStand = 0;
@@ -230,6 +231,21 @@
   // setStyle wirft alles Fremde weg. Die Marker (DOM-Elemente) ueberleben.
   function ebenenAnlegen() {
     if (karte.getSource('routen')) return;
+
+    // Live-Verkehr (gruen/gelb/rot) direkt auf der Karte - TomTom-Kacheln,
+    // eigenes Freikontingent (200.000/Monat), unabhaengig von den Messpunkten
+    // fuers Routing. Nur mit Schluessel.
+    if (tomtomKey && verkehrKarteAn) {
+      karte.addSource('tt-verkehr', {
+        type: 'raster', tileSize: 256, minzoom: 8, maxzoom: 16,
+        tiles: ['https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png?key=' +
+                encodeURIComponent(tomtomKey)],
+        attribution: '© TomTom'
+      });
+      karte.addLayer({ id: 'tt-verkehr', source: 'tt-verkehr', type: 'raster',
+                       paint: { 'raster-opacity': 0.8 } });
+    }
+
     karte.addSource('routen', { type: 'geojson', data: leer() });
     karte.addSource('sperrzonen', { type: 'geojson', data: leer() });
 
@@ -377,6 +393,21 @@
   }
 
   /* ---------------------------------------------------------------- Sperrzonen */
+  // Zeitverlust der Stoerungen, durch die die gewaehlte Route trotz allem
+  // hindurchfuehrt (weil es nichts Besseres gibt oder die Schwelle nicht
+  // erreicht ist). Der Betrag wird auf die Ankunftszeit aufgeschlagen -
+  // BRouter selbst rechnet immer mit freier Fahrt.
+  function stauAufRoute() {
+    var min = 0;
+    sperren.forEach(function (sp) {
+      if (!sp.minuten || !routePunkte.length) return;
+      for (var i = 0; i < routePunkte.length; i += 2) {
+        if (abstand(sp.ort, routePunkte[i]) < sp.radius + 60) { min += sp.minuten; return; }
+      }
+    });
+    return Math.round(min);
+  }
+
   // Aus dem gemeldeten Zeitverlust wird das Sperrgewicht. So verbiegt ein
   // 20-Minuten-Stau die Route deutlich stärker als ein 6-Minuten-Stau, statt
   // dass beide gleich behandelt werden.
@@ -900,13 +931,16 @@
     abseitsZaehler = 0;
     gesagt = {};
     hinweise = hinweiseBauen(v);
+    spurenAnheften([standort || v.koord[0]].concat(stopps.map(function (sp) { return sp.ort; }), [ziel || v.koord[v.koord.length - 1]]));
 
     variantenZeigen();
     var zusatz = '';
     if (v.art.wohn > 400) zusatz += ' · ' + (v.art.wohn / 1000).toFixed(1) + ' km kleine Straßen';
     if (v.art.anlieger > 100) zusatz += ' · ' + (v.art.anlieger / 1000).toFixed(1) + ' km Anlieger';
-    info('→ ' + (zielName || 'Ziel').split(',')[0] + ' · an ' + uhrzeit(v.min) +
-         ' · ' + v.min + ' min · ' + v.km.toFixed(1) + ' km' + zusatz);
+    var stau = stauAufRoute();
+    info('→ ' + (zielName || 'Ziel').split(',')[0] + ' · an ' + uhrzeit(v.min + stau) +
+         ' · ' + (v.min + stau) + ' min' + (stau ? ' (+' + stau + ' Stau)' : '') +
+         ' · ' + v.km.toFixed(1) + ' km' + zusatz);
     if (standort) bannerAktualisieren(standort);
   }
 
@@ -942,9 +976,10 @@
     var v = varianten[variante];
     if (!v || rest < 30) return;
     var restMin = v.min * rest / Math.max(kumWeg[kumWeg.length - 1], 1);
+    var stau = stauAufRoute();
     $('status').textContent = '→ ' + (zielName || 'Ziel').split(',')[0] +
-      ' · an ' + uhrzeit(restMin) + ' · ' + Math.round(restMin) + ' min · ' +
-      (rest / 1000).toFixed(1) + ' km';
+      ' · an ' + uhrzeit(restMin + stau) + ' · ' + Math.round(restMin + stau) + ' min' +
+      (stau ? ' (+' + stau + ' Stau)' : '') + ' · ' + (rest / 1000).toFixed(1) + ' km';
   }
 
   /* ---------------------------------------------------- Tempolimit-Schild */
@@ -992,6 +1027,73 @@
       limitGesagt = limitAktuell;
       sagen('Tempolimit ' + limitAktuell);
     } else if (!drueber) limitGesagt = null;
+  }
+
+  /* ------------------------------------------------------- Spurfuehrung */
+  // BRouter kennt keine Spuren, der offene OSRM-Dienst schon: je Kreuzung die
+  // Spurpfeile samt "gilt fuer dieses Manoever". Eine Anfrage je Route, die
+  // Spuren werden ueber den Ort an unsere Abbiegehinweise geheftet.
+  var SPURPFEIL = { 'uturn': '⤸', 'sharp left': '↙', 'left': '←', 'slight left': '↖',
+                    'straight': '↑', 'none': '↑',
+                    'slight right': '↗', 'right': '→', 'sharp right': '↘',
+                    'merge to left': '↰', 'merge to right': '↱' };
+  var spurSpeicher = { kennung: null, orte: [] };
+
+  function spurenErmitteln(punkte) {
+    var kennung = punkte.map(function (p) { return p[0].toFixed(4) + p[1].toFixed(4); }).join('|');
+    if (spurSpeicher.kennung === kennung) return Promise.resolve(spurSpeicher.orte);
+    var koords = punkte.map(function (p) { return p[1] + ',' + p[0]; }).join(';');
+    return fetch(OSRM + koords + '?steps=true&overview=false')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        var orte = [];
+        if (d && d.routes && d.routes[0]) {
+          d.routes[0].legs.forEach(function (leg) {
+            (leg.steps || []).forEach(function (st) {
+              var kreuzung = (st.intersections || [])[0];
+              if (!kreuzung || !kreuzung.lanes || !st.maneuver) return;
+              orte.push({
+                ort: [st.maneuver.location[1], st.maneuver.location[0]],
+                spuren: kreuzung.lanes.map(function (l) {
+                  return {
+                    zeichen: (l.indications || []).map(function (i) {
+                      return SPURPFEIL[i] || '↑';
+                    }).join(''),
+                    an: !!l.valid
+                  };
+                })
+              });
+            });
+          });
+        }
+        spurSpeicher = { kennung: kennung, orte: orte };
+        return orte;
+      })
+      .catch(function () { return []; });
+  }
+
+  function spurenAnheften(punkte) {
+    spurenErmitteln(punkte).then(function (orte) {
+      hinweise.forEach(function (h) {
+        var best = null, bd = Infinity;
+        orte.forEach(function (o) {
+          var d = abstand(h.ort, o.ort);
+          if (d < 40 && d < bd) { bd = d; best = o; }
+        });
+        if (best) {
+          h.spuren = best.spuren;
+          // "rechts einordnen" in die Ansage, wenn die gueltigen Spuren
+          // eindeutig auf einer Seite liegen und es was zum Einordnen gibt
+          var n = best.spuren.length;
+          if (n >= 3) {
+            var gueltig = [];
+            best.spuren.forEach(function (sp, i) { if (sp.an) gueltig.push(i); });
+            if (gueltig.length && gueltig[0] >= n - gueltig.length) h.einordnen = 'rechts einordnen';
+            else if (gueltig.length && gueltig[gueltig.length - 1] < gueltig.length) h.einordnen = 'links einordnen';
+          }
+        }
+      });
+    });
   }
 
   /* --------------------------------------------------------------- Abbiegen */
@@ -1082,8 +1184,22 @@
     $('banner-danach').hidden = !h.danach;
     if (h.danach) $('banner-danach').textContent = 'dann ' + h.danach;
 
+    // Spurleiste: welche Spuren zum Manoever fuehren
+    var leiste = $('banner-spuren');
+    if (h.spuren && besteD < 900) {
+      leiste.hidden = false;
+      leiste.innerHTML = '';
+      h.spuren.forEach(function (sp) {
+        var k = document.createElement('span');
+        k.textContent = sp.zeichen || '↑';
+        k.className = sp.an ? 'an' : '';
+        leiste.appendChild(k);
+      });
+    } else leiste.hidden = true;
+
     // Zweimal ansagen: mit Vorlauf zum Einordnen, und kurz davor.
-    var anhang = h.danach ? ', dann ' + h.danach : '';
+    var anhang = (h.einordnen ? ', ' + h.einordnen : '') +
+                 (h.danach ? ', dann ' + h.danach : '');
     if (besteD < Math.max(250, tempoKmh * 4.5) && !gesagt['ton' + beste]) {
       gesagt['ton' + beste] = true;
       sagen('In ' + Math.round(besteD / 10) * 10 + ' Metern ' + h.text + anhang);
@@ -1129,41 +1245,61 @@
       // Verzögerung und zusätzliche Mindestpause.
       vorschlagTimer = setTimeout(function () {
         var jetzt = Date.now();
-        if (jetzt - letzteSuche < 1100) return;
+        if (jetzt - letzteSuche < 350) return;
         letzteSuche = jetzt;
-        var umkreis = '';
-        if (standort) {
-          var g = 0.4;
-          umkreis = '&viewbox=' + (standort[1] - g) + ',' + (standort[0] + g) + ',' +
-                                  (standort[1] + g) + ',' + (standort[0] - g);
-        }
-        fetch('https://nominatim.openstreetmap.org/search?format=json&limit=6&countrycodes=de,at,ch&q=' +
-              encodeURIComponent(text) + umkreis)
-          .then(function (r) { return r.json(); })
-          .then(function (t) {
-            liste.innerHTML = '';
-            if (!t.length) { liste.hidden = true; return; }
-            t.forEach(function (o) {
-              var z = document.createElement('div');
-              var name = o.display_name.split(',').slice(0, 3).join(',');
-              z.textContent = name;
-              z.onclick = function () {
-                liste.hidden = true; feld.blur();
-                // Bei gesetztem Ziel wird der Treffer zum Zwischenziel -
-                // sonst müsste man das Ziel erst löschen.
-                if (stoppmodus) {
-                  stoppmodus = false; knopfStand();
-                  stoppHinzufuegen(parseFloat(o.lat), parseFloat(o.lon), name.split(',')[0]);
-                  feld.value = zielName.split(',')[0];
-                } else {
-                  zielSetzen(parseFloat(o.lat), parseFloat(o.lon), name);
-                }
-              };
-              liste.appendChild(z);
-            });
-            liste.hidden = false;
+        var nah = standort ? '&lat=' + standort[0].toFixed(3) + '&lon=' + standort[1].toFixed(3) : '';
+
+        // Photon (Komoot) statt Nominatim: versteht Tippfehler und ist fuer
+        // Vervollstaendigung gebaut. Nominatim bleibt Rueckfall.
+        fetch('https://photon.komoot.io/api/?q=' + encodeURIComponent(text) +
+              '&limit=6&lang=de' + nah)
+          .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+          .then(function (d) {
+            var treffer = (d.features || []).map(function (f) {
+              var pr = f.properties || {};
+              var teile = [pr.name || pr.street || ''];
+              if (pr.street && pr.name && pr.street !== pr.name) teile.push(pr.street);
+              if (pr.housenumber) teile[teile.length - 1] += ' ' + pr.housenumber;
+              if (pr.city || pr.town || pr.village) teile.push(pr.city || pr.town || pr.village);
+              return { name: teile.filter(Boolean).join(', '),
+                       lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0] };
+            }).filter(function (t) { return t.name; });
+            if (!treffer.length) throw new Error('leer');
+            zeigen(treffer);
           })
-          .catch(function () { liste.hidden = true; });
+          .catch(function () {
+            fetch('https://nominatim.openstreetmap.org/search?format=json&limit=6&countrycodes=de,at,ch&q=' +
+                  encodeURIComponent(text))
+              .then(function (r) { return r.json(); })
+              .then(function (t) {
+                zeigen(t.map(function (o) {
+                  return { name: o.display_name.split(',').slice(0, 3).join(','),
+                           lat: parseFloat(o.lat), lon: parseFloat(o.lon) };
+                }));
+              })
+              .catch(function () { liste.hidden = true; });
+          });
+
+        function zeigen(treffer) {
+          liste.innerHTML = '';
+          if (!treffer.length) { liste.hidden = true; return; }
+          treffer.forEach(function (o) {
+            var z = document.createElement('div');
+            z.textContent = o.name;
+            z.onclick = function () {
+              liste.hidden = true; feld.blur();
+              if (stoppmodus) {
+                stoppmodus = false; knopfStand();
+                stoppHinzufuegen(o.lat, o.lon, o.name.split(',')[0]);
+                feld.value = zielName.split(',')[0];
+              } else {
+                zielSetzen(o.lat, o.lon, o.name);
+              }
+            };
+            liste.appendChild(z);
+          });
+          liste.hidden = false;
+        }
       }, 600);
     });
 
@@ -1266,6 +1402,23 @@
       if (!blitzWarnen) $('blitzfahne').hidden = true;
     };
 
+    $('s-verkehrkarte').onclick = function () {
+      verkehrKarteAn = !verkehrKarteAn;
+      $('s-verkehrkarte').textContent = verkehrKarteAn ? 'an' : 'aus';
+      schalter('s-verkehrkarte', verkehrKarteAn);
+      merken('verkehrkarte', verkehrKarteAn ? '1' : '0');
+      // Ebenen einmal neu aufbauen
+      if (karte.getLayer('tt-verkehr')) { karte.removeLayer('tt-verkehr'); karte.removeSource('tt-verkehr'); }
+      if (verkehrKarteAn && tomtomKey) {
+        var q = karte.getSource('routen');
+        if (q) { karte.removeLayer('sperr-rand'); karte.removeLayer('sperr-flaeche');
+                 karte.removeLayer('route-haupt'); karte.removeLayer('route-rand');
+                 karte.removeLayer('route-neben');
+                 karte.removeSource('routen'); karte.removeSource('sperrzonen'); }
+        ebenenAnlegen();
+      }
+    };
+
     $('s-verkehr').onclick = function () {
       verkehrAn = !verkehrAn;
       $('s-verkehr').textContent = verkehrAn ? 'an' : 'aus';
@@ -1342,6 +1495,7 @@
     nacht       = geholt('nacht', '0') === '1';
     blitzWarnen = geholt('blitzer', '1') === '1';
     verkehrAn   = geholt('verkehr', '1') === '1';
+    verkehrKarteAn = geholt('verkehrkarte', '1') === '1';
     sprache     = geholt('sprache', '0') === '1';
     schwelle    = parseInt(geholt('schwelle', '5'), 10) || 5;
     stadtmodus  = geholt('stadt', 'auto');
@@ -1364,6 +1518,7 @@
     schalter('s-nacht', nacht);   $('s-nacht').textContent   = nacht ? 'an' : 'aus';
     schalter('s-blitzer', blitzWarnen); $('s-blitzer').textContent = blitzWarnen ? 'an' : 'aus';
     schalter('s-verkehr', verkehrAn);   $('s-verkehr').textContent = verkehrAn ? 'an' : 'aus';
+    schalter('s-verkehrkarte', verkehrKarteAn); $('s-verkehrkarte').textContent = verkehrKarteAn ? 'an' : 'aus';
     $('s-schwelle').value = String(schwelle);
     $('s-stadt').value = stadtmodus;
     $('s-tomtom').value = tomtomKey;

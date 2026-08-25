@@ -263,3 +263,13 @@ html, body {
 .maplibregl-ctrl-attrib { background: rgba(16,20,24,.6) !important; }
 .maplibregl-ctrl-attrib, .maplibregl-ctrl-attrib a { color: rgba(242,244,246,.6) !important; font-size: 9px !important; }
 .maplibregl-ctrl-bottom-left, .maplibregl-ctrl-top-left { display: none; }
+
+/* Spurleiste im Banner */
+#banner-spuren { display: flex; gap: 4px; margin-top: 6px; }
+#banner-spuren[hidden] { display: none; }
+#banner-spuren span {
+  min-width: 26px; padding: 2px 4px; border-radius: 6px; text-align: center;
+  font-size: 16px; line-height: 22px;
+  background: rgba(255,255,255,.12); color: rgba(255,255,255,.4);
+}
+#banner-spuren span.an { background: #1f6feb; color: #fff; }
