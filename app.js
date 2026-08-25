@@ -327,7 +327,8 @@
     if (!verkehrAn || !routePunkte.length || verkehrLaeuft) return;
     verkehrLaeuft = true;
     letzterVerkehr = Date.now();
-    if (!stillschweigend) info('Prüfe Verkehrslage …');
+    $('k-verkehr').classList.add('an');
+    if (!stillschweigend) info('Prüfe Verkehrslage auf den nächsten Kilometern …');
 
     // Nur den Teil vor uns betrachten - hinter uns liegende Staus sind egal.
     var vorne = routePunkte.slice(standort ? routenIndex(standort) : 0);
@@ -336,6 +337,7 @@
     window.Verkehr.alleStoerungen(vorne, routeRefs, tomtomKey, schwelle)
       .then(function (stoerungen) {
         verkehrLaeuft = false;
+        $('k-verkehr').classList.remove('an');
         var vorher = sperren.filter(function (s) { return s.quelle !== 'hand'; }).length;
         sperrenLeeren('autobahn'); sperrenLeeren('tomtom');
         stoerungen.forEach(sperreHinzufuegen);
@@ -357,7 +359,11 @@
               ' Minuten. Ich suche eine Umfahrung.'); }
         route();
       })
-      .catch(function () { verkehrLaeuft = false; });
+      .catch(function () {
+        verkehrLaeuft = false;
+        $('k-verkehr').classList.remove('an');
+        info('Verkehrsdienst antwortet nicht');
+      });
   }
 
   function verkehrTaktStarten() {
@@ -899,6 +905,7 @@
     };
 
     $('k-stopp').onclick = function () {
+      sheetZeigen(false);
       stoppmodus = !stoppmodus; staumodus = false; knopfStand();
       info(stoppmodus ? 'Zwischenziel: auf die Karte tippen oder oben eintippen' : 'Abgebrochen');
       if (stoppmodus) $('suche').value = '';
@@ -962,7 +969,11 @@
       if (tomtomKey && verkehrAn) verkehrPruefen(false);
     };
 
-    $('s-pruefen').onclick = function () { sheetZeigen(false); verkehrPruefen(false); };
+    $('k-verkehr').onclick = function () {
+      sheetZeigen(false);
+      if (!ziel) { info('Erst ein Ziel setzen'); return; }
+      verkehrPruefen(false);
+    };
 
     $('s-stau').onclick = function () {
       staumodus = !staumodus; stoppmodus = false; knopfStand();

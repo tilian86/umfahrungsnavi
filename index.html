@@ -14,8 +14,8 @@
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <link rel="manifest" href="manifest.json">
   <title>Umfahrungsnavi</title>
-  <link rel="stylesheet" href="leaflet/leaflet.css?v=3">
-  <link rel="stylesheet" href="stil.css?v=3">
+  <link rel="stylesheet" href="leaflet/leaflet.css?v=4">
+  <link rel="stylesheet" href="stil.css?v=4">
 </head>
 <body>
 
@@ -53,7 +53,7 @@
     <div id="knoepfe">
       <button id="k-folgen"  class="an">Folgen</button>
       <button id="k-sprache">Ansage</button>
-      <button id="k-stopp">+ Stopp</button>
+      <button id="k-verkehr">Verkehr</button>
       <button id="k-uebersicht">Übersicht</button>
       <button id="k-mehr">Mehr</button>
     </div>
@@ -109,7 +109,7 @@
     </label>
 
     <div class="knopfreihe">
-      <button id="s-pruefen">Verkehr jetzt prüfen</button>
+      <button id="k-stopp">Zwischenziel setzen</button>
       <button id="s-stau">Stau von Hand setzen</button>
     </div>
     <div class="knopfreihe">
@@ -118,11 +118,11 @@
     </div>
   </div>
 
-  <script src="leaflet/leaflet.js?v=3"></script>
-  <script src="verkehr.js?v=3"></script>
+  <script src="leaflet/leaflet.js?v=4"></script>
+  <script src="verkehr.js?v=4"></script>
   <!-- tut nichts, ausser die Adresse enthaelt ?pruefstand -->
-  <script src="pruefstand.js?v=3"></script>
-  <script src="app.js?v=3"></script>
+  <script src="pruefstand.js?v=4"></script>
+  <script src="app.js?v=4"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {
