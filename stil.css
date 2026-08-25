@@ -16,7 +16,8 @@ html, body {
   -webkit-user-select: none; user-select: none;
 }
 
-#karte { position: absolute; inset: 0; background: #101418; z-index: 0; }
+#karte { position: absolute; inset: 0; background: #101418; z-index: 0;
+         transform-origin: center; --gegen: 0deg; }
 
 /* ------------------------------------------------------------- Abbiegebanner */
 /* Der Banner ueberdeckt oben einen Streifen Karte. Das ist Absicht: waehrend
@@ -228,3 +229,8 @@ html, body {
 
 /* Mobile Blitzer stechen heraus - die wechseln taeglich */
 .blitz-punkt.mobil { background: #e6452e; color: #fff; }
+
+/* Fahransicht: runde Zeichen bleiben aufrecht, wenn die Karte sich dreht */
+.blitz-punkt, .stopp-punkt, .ziel-punkt { transform: rotate(var(--gegen)); }
+.ziel-punkt { font-size: 30px; line-height: 34px; text-align: center;
+              filter: drop-shadow(0 2px 3px rgba(0,0,0,.6)); }

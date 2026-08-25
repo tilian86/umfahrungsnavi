@@ -76,6 +76,7 @@
   var abseitsZaehler = 0, letzteNeu = 0, laeuft = 0;
   var vorschlagTimer = null, letzteSuche = 0;
   var verkehrTimer = null, letzterVerkehr = 0, verkehrLaeuft = false;
+  var fahrmodus = false, drehung = 0, zoomStufe = 0, tempoKmh = 0;
 
   function $(id) { return document.getElementById(id); }
   function info(t) { $('status').textContent = t; }
@@ -119,6 +120,62 @@
   function uhrzeit(minutenSpaeter) {
     var d = new Date(Date.now() + minutenSpaeter * 60000);
     return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+  }
+
+  /* ------------------------------------------------------- Fahransicht */
+  // Fahrtrichtung oben, Standort im unteren Drittel, Zoom nach Tempo -
+  // wie bei den grossen Navis. Leaflet kann selbst nicht drehen, deshalb
+  // wird der Kartenbehaelter per CSS rotiert und dafuer vergroessert, damit
+  // beim Drehen keine Ecken frei bleiben. Strassennamen stehen dann schraeg -
+  // der Preis jeder gedrehten Rasterkarte; beim Fahren zaehlt die Geometrie.
+  function fahrmodusAnwenden() {
+    var an = !!(ziel && folgen);
+    if (an === fahrmodus) return;
+    fahrmodus = an;
+    var d = $('karte');
+    d.style.inset = an ? '-30%' : '0';
+    d.style.transition = an ? 'transform .7s linear' : 'none';
+    if (!an) drehungSetzen(0);
+    karte.invalidateSize(false);
+  }
+
+  // Kuerzester Weg zum neuen Winkel, kumulativ gefuehrt - sonst dreht die
+  // CSS-Uebergangsanimation bei 359 -> 1 einmal falsch herum durch.
+  function drehungSetzen(kurs) {
+    var soll = -kurs;
+    var diff = ((soll - drehung) % 360 + 540) % 360 - 180;
+    drehung += diff;
+    var d = $('karte');
+    d.style.transform = fahrmodus && kurs !== 0 ? 'rotate(' + drehung + 'deg)' : '';
+    // runde Marker (Blitzer-Tempo, Stopp-Nummern) wieder aufrecht stellen
+    d.style.setProperty('--gegen', (-drehung) + 'deg');
+  }
+
+  function tempoZoom() {
+    if (tempoKmh >= 95) return 15;
+    if (tempoKmh >= 55) return 16;
+    return 17;
+  }
+
+  // Punkt ein Stueck in Fahrtrichtung vor dem Auto - der wird zentriert,
+  // damit das Auto im unteren Drittel sitzt und vorn Karte zu sehen ist.
+  function vorausPunkt(ll, kurs, zoom) {
+    var mProPx = 156543.03392 * Math.cos(ll[0] * Math.PI / 180) / Math.pow(2, zoom);
+    var meter = mProPx * karte.getSize().y * 0.26;
+    var t = Math.PI / 180;
+    return [ll[0] + meter * Math.cos(kurs * t) / 111320,
+            ll[1] + meter * Math.sin(kurs * t) / (111320 * Math.cos(ll[0] * t))];
+  }
+
+  function folgeAnsicht(ll) {
+    if (!fahrmodus || kurs === null) {
+      karte.setView(ll, Math.max(karte.getZoom(), 16), { animate: true });
+      return;
+    }
+    var z = tempoZoom();
+    if (z !== zoomStufe) zoomStufe = z; else z = karte.getZoom();
+    drehungSetzen(kurs);
+    karte.setView(vorausPunkt(ll, kurs, z), z, { animate: true });
   }
 
   /* ------------------------------------------------------------------- Karte */
@@ -182,8 +239,12 @@
       if (typeof p.coords.heading === 'number' && !isNaN(p.coords.heading) && p.coords.speed > 1) {
         kurs = p.coords.heading;
       }
+      tempoKmh = (p.coords.speed || 0) * 3.6;
       ichZeichnen(ll, p.coords.accuracy);
-      if (folgen) karte.setView(ll, Math.max(karte.getZoom(), 16), { animate: !erste });
+      if (folgen) {
+        if (erste) karte.setView(ll, 16);
+        else folgeAnsicht(ll);
+      }
       if (erste && ziel) route();
       if (ziel && routePunkte.length) {
         bannerAktualisieren(ll);
@@ -464,9 +525,13 @@
     ziel = [lat, lon];
     zielName = name || '';
     if (zielMarke) karte.removeLayer(zielMarke);
-    zielMarke = L.marker(ziel).addTo(karte);
+    zielMarke = L.marker(ziel, {
+      icon: L.divIcon({ className: '', iconSize: [34, 34], iconAnchor: [17, 30],
+                        html: '<div class="ziel-punkt">🏁</div>' })
+    }).addTo(karte);
     $('suche').value = (name || '').split(',')[0];
     $('suche-loeschen').hidden = false;
+    fahrmodusAnwenden();
     route();
   }
 
@@ -484,6 +549,7 @@
     $('blitzfahne').hidden = true;
     $('suche').value = '';
     $('suche-loeschen').hidden = true;
+    fahrmodusAnwenden();
     info('Ziel gelöscht');
   }
 
@@ -963,7 +1029,11 @@
   function folgenSetzen(an) {
     folgen = an;
     schalter('k-folgen', an);
-    if (an && standort) karte.setView(standort, Math.max(karte.getZoom(), 16));
+    fahrmodusAnwenden();
+    if (an && standort) {
+      if (fahrmodus && kurs !== null) folgeAnsicht(standort);
+      else karte.setView(standort, Math.max(karte.getZoom(), 16));
+    }
   }
   function sheetZeigen(an) {
     $('sheet').hidden = !an;
