@@ -1098,6 +1098,17 @@
     stadtmodus  = geholt('stadt', 'auto');
     tomtomKey   = geholt('tomtom', '');
 
+    // Schluessel-Uebergabe per Adresse: ?key=... wird einmal eingelesen und
+    // gemerkt. So laesst sich der TomTom-Schluessel als Link aufs Handy
+    // bringen, statt ihn abzutippen. Aus der Adresszeile wird er entfernt;
+    // in der Homescreen-App bleibt er in der Start-URL - dort sieht ihn keiner.
+    var km = location.search.match(/[?&]key=([A-Za-z0-9_-]{16,})/);
+    if (km) {
+      tomtomKey = km[1];
+      merken('tomtom', tomtomKey);
+      try { history.replaceState(null, '', location.pathname); } catch (e) {}
+    }
+
     kartenAufbau();
     schalter('k-folgen', true);
     schalter('k-sprache', sprache);
