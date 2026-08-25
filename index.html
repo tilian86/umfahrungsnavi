@@ -10,12 +10,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Staufunk">
-  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=12">
+  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=13">
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <link rel="manifest" href="manifest.json">
   <title>Staufunk</title>
-  <link rel="stylesheet" href="leaflet/leaflet.css?v=12">
-  <link rel="stylesheet" href="stil.css?v=12">
+  <link rel="stylesheet" href="leaflet/leaflet.css?v=13">
+  <link rel="stylesheet" href="stil.css?v=13">
 </head>
 <body>
 
@@ -36,6 +36,12 @@
     <div id="ersatzfahne" hidden></div>
     <div id="blitzfahne" hidden></div>
     <div id="stoerfahne" hidden></div>
+  </div>
+
+  <!-- Eigenes Tempo + Limit, unten rechts ueber der Leiste -->
+  <div id="tempoecke" hidden>
+    <div id="tempojetzt">–</div>
+    <div id="temposchild" hidden>50</div>
   </div>
 
   <div id="unten">
@@ -119,11 +125,11 @@
     </div>
   </div>
 
-  <script src="leaflet/leaflet.js?v=12"></script>
-  <script src="verkehr.js?v=12"></script>
+  <script src="leaflet/leaflet.js?v=13"></script>
+  <script src="verkehr.js?v=13"></script>
   <!-- tut nichts, ausser die Adresse enthaelt ?pruefstand -->
-  <script src="pruefstand.js?v=12"></script>
-  <script src="app.js?v=12"></script>
+  <script src="pruefstand.js?v=13"></script>
+  <script src="app.js?v=13"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {

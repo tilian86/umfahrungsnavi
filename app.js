@@ -78,9 +78,11 @@
   var vorschlagTimer = null, letzteSuche = 0;
   var verkehrTimer = null, letzterVerkehr = 0, verkehrLaeuft = false;
   var fahrmodus = false, drehung = 0, zoomStufe = 0, tempoKmh = 0;
+  var kumWeg = [], limits = [], limitAktuell = null, limitGesagt = null;
 
   function $(id) { return document.getElementById(id); }
-  function info(t) { $('status').textContent = t; }
+  var infoStand = 0;
+  function info(t) { $('status').textContent = t; infoStand = Date.now(); }
   function merken(k, v) { try { localStorage.setItem('un-' + k, v); } catch (e) {} }
   function geholt(k, ers) {
     try { var v = localStorage.getItem('un-' + k); return v === null ? ers : v; }
@@ -251,7 +253,9 @@
         bannerAktualisieren(ll);
         blitzPruefen(ll);
         abweichungPruefen(ll);
+        fahrdatenZeigen(ll);
       }
+      tempoEcke(ll);
     }, function (e) {
       info(e.code === 1 ? 'Standort abgelehnt – in den Einstellungen erlauben'
                         : 'Standort nicht verfügbar');
@@ -551,8 +555,17 @@
     }).addTo(karte);
     $('suche').value = (name || '').split(',')[0];
     $('suche-loeschen').hidden = false;
+    if (name && name !== 'Kartenpunkt') zielMerken(name.split(',')[0], lat, lon);
     fahrmodusAnwenden();
     route();
+  }
+
+  function zielMerken(n, lat, lon) {
+    var liste = [];
+    try { liste = JSON.parse(geholt('ziele', '[]')); } catch (e) {}
+    liste = [{ n: n, lat: lat, lon: lon }].concat(
+      liste.filter(function (z) { return z.n !== n; })).slice(0, 6);
+    merken('ziele', JSON.stringify(liste));
   }
 
   function zielLoeschen() {
@@ -849,6 +862,12 @@
              .addTo(karte);
 
     routePunkte = v.koord;
+    kumWeg = [0];
+    for (var ki = 1; ki < v.koord.length; ki++) {
+      kumWeg.push(kumWeg[ki - 1] + abstand(v.koord[ki - 1], v.koord[ki]));
+    }
+    limits = limitsAus(v.messages);
+    limitAktuell = null; limitGesagt = null;
     abseitsZaehler = 0;
     gesagt = {};
     hinweise = hinweiseBauen(v);
@@ -881,6 +900,69 @@
         if (verkehrAn) verkehrPruefen(true);
       });
     }, 1500);
+  }
+
+  /* ------------------------------------------------------- Fahrtdaten live */
+  // Waehrend der Fahrt zaehlen Restzeit und Ankunft runter. Die Statuszeile
+  // wird nur ueberschrieben, wenn dort seit ein paar Sekunden nichts Neues
+  // steht - Meldungen wie "Stau voraus" sollen erst gelesen werden koennen.
+  function fahrdatenZeigen(ll) {
+    if (!kumWeg.length || Date.now() - infoStand < 5000) return;
+    var idx = routenIndex(ll);
+    var rest = kumWeg[kumWeg.length - 1] - kumWeg[idx];
+    var v = varianten[variante];
+    if (!v || rest < 30) return;
+    var restMin = v.min * rest / Math.max(kumWeg[kumWeg.length - 1], 1);
+    $('status').textContent = '→ ' + (zielName || 'Ziel').split(',')[0] +
+      ' · an ' + uhrzeit(restMin) + ' · ' + Math.round(restMin) + ' min · ' +
+      (rest / 1000).toFixed(1) + ' km';
+  }
+
+  /* ---------------------------------------------------- Tempolimit-Schild */
+  // Das Limit je Abschnitt steckt schon in BRouters Antwort (maxspeed in
+  // `messages`) - es musste nur angezeigt werden. Dazu das eigene Tempo aus
+  // dem GPS. Beim Ersatzdienst (OSRM) gibt es keine messages, dann bleibt
+  // die Ecke leer.
+  function limitsAus(messages) {
+    var raus = [];
+    if (!messages || messages.length < 2) return raus;
+    var kopf = messages[0];
+    var iLon = kopf.indexOf('Longitude'), iLat = kopf.indexOf('Latitude');
+    var iT = kopf.indexOf('WayTags');
+    if (iLon < 0 || iT < 0) return raus;
+    for (var i = 1; i < messages.length; i++) {
+      var m = /maxspeed=(\d+)/.exec(messages[i][iT] || '');
+      raus.push({
+        ort: [parseInt(messages[i][iLat], 10) / 1e6, parseInt(messages[i][iLon], 10) / 1e6],
+        limit: m ? parseInt(m[1], 10) : null
+      });
+    }
+    return raus;
+  }
+
+  function tempoEcke(ll) {
+    var ecke = $('tempoecke');
+    if (!routePunkte.length || !ziel) { ecke.hidden = true; return; }
+    ecke.hidden = false;
+    $('tempojetzt').textContent = tempoKmh > 2 ? Math.round(tempoKmh) : '–';
+
+    var best = null, bestD = Infinity;
+    for (var i = 0; i < limits.length; i++) {
+      var d = abstand(ll, limits[i].ort);
+      if (d < bestD) { bestD = d; best = limits[i]; }
+    }
+    if (best && bestD < 400) limitAktuell = best.limit;
+    var schild = $('temposchild');
+    if (!limitAktuell) { schild.hidden = true; return; }
+    schild.hidden = false;
+    schild.textContent = limitAktuell;
+
+    var drueber = tempoKmh > limitAktuell + 8;
+    schild.classList.toggle('drueber', drueber);
+    if (drueber && limitGesagt !== limitAktuell) {
+      limitGesagt = limitAktuell;
+      sagen('Tempolimit ' + limitAktuell);
+    } else if (!drueber) limitGesagt = null;
   }
 
   /* --------------------------------------------------------------- Abbiegen */
@@ -959,7 +1041,7 @@
     if (besteD < 18) gesagt['weg' + beste] = true;
 
     banner.hidden = false;
-    banner.classList.toggle('gleich', besteD < 120);
+    banner.classList.toggle('gleich', besteD < Math.max(120, tempoKmh * 2));
     $('banner-pfeil').textContent = h.kreis ? '↻' : '↑';
     $('banner-pfeil').style.transform =
       h.kreis ? 'none' : 'rotate(' + Math.max(-135, Math.min(135, h.winkel)) + 'deg)';
@@ -973,10 +1055,10 @@
 
     // Zweimal ansagen: mit Vorlauf zum Einordnen, und kurz davor.
     var anhang = h.danach ? ', dann ' + h.danach : '';
-    if (besteD < 250 && !gesagt['ton' + beste]) {
+    if (besteD < Math.max(250, tempoKmh * 4.5) && !gesagt['ton' + beste]) {
       gesagt['ton' + beste] = true;
       sagen('In ' + Math.round(besteD / 10) * 10 + ' Metern ' + h.text + anhang);
-    } else if (besteD < 60 && !gesagt['jetzt' + beste]) {
+    } else if (besteD < Math.max(60, tempoKmh * 1.2) && !gesagt['jetzt' + beste]) {
       gesagt['jetzt' + beste] = true;
       sagen('Jetzt ' + h.text + anhang);
     }
@@ -1054,6 +1136,26 @@
           })
           .catch(function () { liste.hidden = true; });
       }, 600);
+    });
+
+    // Leeres Feld antippen zeigt die letzten Ziele - die meisten Fahrten
+    // gehen immer wieder an dieselben Orte.
+    feld.addEventListener('focus', function () {
+      if (feld.value.trim()) return;
+      var alte = [];
+      try { alte = JSON.parse(geholt('ziele', '[]')); } catch (e) {}
+      if (!alte.length) return;
+      liste.innerHTML = '';
+      alte.forEach(function (z) {
+        var d = document.createElement('div');
+        d.textContent = '↺ ' + z.n;
+        d.onclick = function () {
+          liste.hidden = true; feld.blur();
+          zielSetzen(z.lat, z.lon, z.n);
+        };
+        liste.appendChild(d);
+      });
+      liste.hidden = false;
     });
 
     feld.addEventListener('blur', function () {
