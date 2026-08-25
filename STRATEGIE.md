@@ -252,3 +252,51 @@ Tempolimit überschreitet.
 BRouter die verstopfte Bundesstraße mit 100 km/h rechnet, ist der Vergleich
 zugunsten der Hauptstraße verzerrt. Genau das korrigiert das aus dem
 Zeitverlust gerechnete Sperrgewicht.
+
+---
+
+## 12. Nachtrag: der Radius entscheidet, nicht die Aggressivität
+
+Der Fall „Rush Hour Tübinger Innenstadt, bitte drumherum durch Anliegerstraßen"
+hat eine Schwäche des Konzepts aufgedeckt. Eine Sperrzone ist ein Kreis — und
+ein zu großer Kreis sperrt genau die Schleichwege mit, um die es geht.
+
+Gemessen, Weststadt → Österberg mit einer Störung mitten auf der Hauptachse:
+
+| Sperrradius | Ergebnis |
+|---|---|
+| 500 m | 7,96 km — flieht über die B27, nur 23 % kleine Straßen |
+| 300 m | 4,99 km — Parallelstraßen, 56 % kleine Straßen, **0 m B27** |
+| 200 m | 4,99 km — dasselbe |
+
+**Deshalb: in der Stadt enge Sperren (200 m), auf der Autobahn weite (900 m).**
+Auf der Autobahn gibt es keine Parallelstraße, und man muss rechtzeitig vorher
+abfahren; in der Stadt liegt die Ausweichstraße oft nur 80 bis 150 m daneben.
+
+Ein langer Stau wird deshalb nicht als ein fetter Kreis abgebildet, sondern als
+Kette enger Kreise entlang der gemessenen Abschnitte. Genau dafür liefert
+TomTom Flow die Segmentgeometrie mit.
+
+### Der zweite Hebel: `vmax`
+
+Wenn *alle* Hauptstraßen einer Gegend dicht sind, hilft der enge Radius nicht
+mehr — dann flieht die Route auf die Schnellstraße, weil BRouter dort mit
+100 km/h rechnet und im Wohngebiet mit 30. `vmax` deckelt die Rechen-
+geschwindigkeit auf allen Straßen und schrumpft diesen Vorsprung:
+
+| | ohne Stau | mit Stau auf allen Hauptachsen |
+|---|---|---|
+| vmax 130 | 3,77 km · 34 % klein | 7,96 km · 23 % klein · 1,5 km B27 |
+| vmax 50 | 3,77 km · 34 % klein | 6,91 km · **61 % klein** · 0 m B27 |
+
+Ohne Stau ändert vmax praktisch nichts — auf Langstrecke wäre es dagegen fatal
+(Stuttgart–Karlsruhe: 138 statt 65 Minuten, weil er die Autobahn meidet).
+Deshalb bietet die App den „Schleichweg" nur bei kurzen Fahrten als zusätzliche
+Variante an, statt ihn zu erzwingen.
+
+### Waze, nochmal geprüft
+
+Der undokumentierte Live-Map-Endpunkt, den man früher anzapfen konnte, ist
+inzwischen dicht: `403 Forbidden` auf `/live-map/api/georss`, `404` auf den
+alten RtServer-Pfaden. Es ist also nicht nur eine Frage der Bedingungen —
+technisch führt kein Weg mehr hin.

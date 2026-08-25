@@ -34,6 +34,12 @@
     'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
   ];
   var AUTOBAHN = 'https://verkehr.autobahn.de/o/autobahn/';
+
+  // Sperrradius in der Stadt. Bewusst eng: die Parallelstrasse ist oft nur
+  // 80 bis 150 m entfernt und soll frei bleiben. Auf der Autobahn darf die
+  // Sperre viel weiter sein - dort gibt es keine Parallelstrasse, und man
+  // muss rechtzeitig vorher abfahren.
+  var STADT_RADIUS = 200;
   var TOMTOM   = 'https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json';
 
   /* ------------------------------------------------------------ Geometrie */
@@ -331,7 +337,8 @@
           // Zeitverlust auf dem Stueck bis zur naechsten Stuetzstelle
           var strecke = i + 1 < stuetzen.length ? abstand(stuetzen[i], stuetzen[i + 1]) : 800;
           var verlust = strecke / 1000 * (60 / Math.max(m.jetzt, 3) - 60 / m.frei);  // Minuten
-          if (!lauf) lauf = { ort: m.ort, minuten: 0, tempo: m.jetzt };
+          if (!lauf) lauf = { orte: [], minuten: 0, tempo: m.jetzt };
+          lauf.orte.push(m.ort);
           lauf.minuten += verlust;
           lauf.tempo = Math.min(lauf.tempo, m.jetzt);
         } else if (lauf) {
@@ -341,16 +348,28 @@
       });
       if (lauf && lauf.minuten >= schwelle) raus.push(lauf);
 
-      return raus.map(function (s) {
-        var lage = anDerRoute(s.ort, route);
-        return {
-          ort: s.ort, index: lage.index,
-          minuten: Math.round(s.minuten), tempo: Math.round(s.tempo),
-          hart: false, radius: 700,
-          text: 'Stau · ' + Math.round(s.minuten) + ' min · ' + Math.round(s.tempo) + ' km/h',
-          quelle: 'tomtom'
-        };
+      // Wichtig: je Messpunkt eine ENGE Sperre statt einer fetten je Stau.
+      // Gemessen quer durch Tuebingen: mit 500 m Radius flieht die Route auf
+      // die B27 (7,96 km, 23 % kleine Strassen), mit 200 m nimmt sie die
+      // Parallelstrassen (4,99 km, 56 %). Ein fetter Kreis sperrt eben genau
+      // die Schleichwege mit, um die es geht.
+      var stoerungen = [];
+      raus.forEach(function (s) {
+        var minutenJeStueck = s.minuten / s.orte.length;
+        s.orte.forEach(function (ort) {
+          var lage = anDerRoute(ort, route);
+          stoerungen.push({
+            ort: ort, index: lage.index,
+            minuten: Math.round(minutenJeStueck * 10) / 10,
+            gesamtMinuten: Math.round(s.minuten),
+            tempo: Math.round(s.tempo),
+            hart: false, radius: STADT_RADIUS,
+            text: 'Stau · ' + Math.round(s.minuten) + ' min · ' + Math.round(s.tempo) + ' km/h',
+            quelle: 'tomtom'
+          });
+        });
       });
+      return stoerungen;
     }).catch(function () { return []; });
   }
 
@@ -363,9 +382,12 @@
       var alle = teile[0].concat(teile[1]);
       // Doppelte aussortieren: melden Autobahn-API und TomTom denselben Stau,
       // gewinnt die amtliche Meldung, weil sie die Minuten sauberer kennt.
+      // Doppelte aussortieren: melden Autobahn-API und TomTom denselben Stau,
+      // gewinnt die amtliche Meldung. Der Mindestabstand richtet sich nach der
+      // Sperrgroesse - enge Stadtsperren duerfen dicht in einer Kette liegen.
       return alle.filter(function (s, i) {
         return !alle.some(function (t, j) {
-          return j < i && abstand(s.ort, t.ort) < 1500;
+          return j < i && abstand(s.ort, t.ort) < Math.max(s.radius, t.radius) * 1.2;
         });
       });
     });

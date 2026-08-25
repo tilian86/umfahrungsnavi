@@ -14,8 +14,8 @@
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <link rel="manifest" href="manifest.json">
   <title>Umfahrungsnavi</title>
-  <link rel="stylesheet" href="leaflet/leaflet.css?v=2">
-  <link rel="stylesheet" href="stil.css?v=2">
+  <link rel="stylesheet" href="leaflet/leaflet.css?v=3">
+  <link rel="stylesheet" href="stil.css?v=3">
 </head>
 <body>
 
@@ -88,6 +88,18 @@
     </label>
 
     <label class="feld">
+      Schleichweg-Vorschlag
+      <select id="s-stadt">
+        <option value="auto">bei kurzen Fahrten – empfohlen</option>
+        <option value="an">immer anbieten</option>
+        <option value="aus">nie</option>
+      </select>
+      <small>Bietet bei Stau zusätzlich eine Route an, die die schnellen
+        Straßen meidet und stattdessen durch Neben- und Anliegerstraßen führt.
+        Ohne Stau ändert sich dadurch nichts.</small>
+    </label>
+
+    <label class="feld">
       TomTom-Schlüssel <small>für Staus abseits der Autobahn</small>
       <input id="s-tomtom" type="text" placeholder="noch keiner hinterlegt"
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
@@ -106,11 +118,11 @@
     </div>
   </div>
 
-  <script src="leaflet/leaflet.js?v=2"></script>
-  <script src="verkehr.js?v=2"></script>
+  <script src="leaflet/leaflet.js?v=3"></script>
+  <script src="verkehr.js?v=3"></script>
   <!-- tut nichts, ausser die Adresse enthaelt ?pruefstand -->
-  <script src="pruefstand.js?v=2"></script>
-  <script src="app.js?v=2"></script>
+  <script src="pruefstand.js?v=3"></script>
+  <script src="app.js?v=3"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {

@@ -29,6 +29,23 @@
   // Umweg lohnt, solange er kürzer ist als das, was der Stau kostet."
   var METER_JE_MINUTE = 800;
 
+  // Stadtmodus. `vmax` deckelt die Rechengeschwindigkeit auf allen Strassen.
+  // Bei 130 ist die Bundesstrasse dem 30er-Wohngebiet dreifach ueberlegen -
+  // dann flieht die Route bei Stau lieber 4 km ueber die B27, statt 500 m
+  // durch Nebenstrassen zu schleichen. Bei 50 schrumpft der Vorsprung auf das
+  // Anderthalbfache, und der Schleichweg gewinnt.
+  //
+  // Gemessen quer durch Tuebingen mit Stau auf der Hauptachse:
+  //   vmax 130 -> 7,96 km, 23 % kleine Strassen, 1,5 km auf der B27
+  //   vmax  50 -> 6,91 km, 61 % kleine Strassen,   0 m auf der B27
+  // Ohne Stau aendert vmax so gut wie nichts (3,77 gegen 3,85 km).
+  //
+  // Auf Langstrecke waere das fatal (Stuttgart-Karlsruhe: 138 statt 65 min),
+  // deshalb nur bei kurzen Fahrten - da ist ein Hochgeschwindigkeitsumweg
+  // ohnehin selten die Antwort.
+  var STADT_VMAX = 50;
+  var STADT_BIS_KM = 15;
+
   var KARTEN = {
     tag:   { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
              hg: '#eae6e0', filter: 'none' },
@@ -52,6 +69,7 @@
   var folgen = true, sprache = false, nacht = false;
   var blitzWarnen = true, verkehrAn = true, stoppmodus = false, staumodus = false;
   var schwelle = 5;                      // Minuten Zeitverlust
+  var stadtmodus = 'auto';               // 'auto' | 'an' | 'aus'
   var tomtomKey = '';
   var profilId = null;
   var abseitsZaehler = 0, letzteNeu = 0, laeuft = 0;
@@ -125,10 +143,17 @@
 
     karte.on('click', function (e) {
       if (stoppmodus) { stoppmodus = false; knopfStand(); stoppHinzufuegen(e.latlng.lat, e.latlng.lng); }
-      else if (staumodus) { staumodus = false; knopfStand(); sperreHinzufuegen({
-        ort: [e.latlng.lat, e.latlng.lng], radius: 500, minuten: 10,
-        text: 'Stau von Hand', quelle: 'hand'
-      }); }
+      else if (staumodus) {
+        staumodus = false; knopfStand();
+        sperreHinzufuegen({
+          ort: [e.latlng.lat, e.latlng.lng], radius: 220, minuten: 10,
+          text: 'Stau von Hand', quelle: 'hand'
+        });
+        // Neu rechnen muss hier stehen, nicht in sperreHinzufuegen: die
+        // Verkehrspruefung legt mehrere Sperren auf einmal an und rechnet
+        // danach ein einziges Mal neu.
+        if (ziel) route(); else info('Stauzone gesetzt – jetzt das Ziel eingeben');
+      }
     });
 
     // Sobald der Nutzer die Karte selbst bewegt, hört das Folgen auf.
@@ -241,7 +266,7 @@
   function sperreHinzufuegen(s) {
     var eintrag = {
       ort: s.ort,
-      radius: s.radius || 700,
+      radius: s.radius || 220,
       gewicht: gewichtAus(s.minuten || 0, s.hart),
       hart: !!s.hart,
       minuten: s.minuten || 0,
@@ -457,17 +482,28 @@
     var nogos = nogoParameter();
 
     profilBesorgen(false).then(function (prof) {
-      // Vier Kandidaten, damit am Ende wirklich drei *verschiedene* übrig
-      // bleiben. BRouters Alternativen ähneln sich oft; die vierte Anfrage
-      // meidet Autobahnen und bringt damit fast immer eine echte Alternative.
+      // Mehrere Kandidaten, damit am Ende wirklich drei *verschiedene* übrig
+      // bleiben. BRouters Alternativen ähneln sich oft; die Anfrage ohne
+      // Autobahn bringt fast immer eine echte Alternative.
       var kandidaten = [
-        '&alternativeidx=0', '&alternativeidx=1', '&alternativeidx=2',
-        '&alternativeidx=0&profile:avoid_motorways=1'
+        { zusatz: '&alternativeidx=0', marke: '' },
+        { zusatz: '&alternativeidx=1', marke: '' },
+        { zusatz: '&alternativeidx=2', marke: '' },
+        { zusatz: '&alternativeidx=0&profile:avoid_motorways=1', marke: '' }
       ];
-      var anfragen = kandidaten.map(function (zusatz) {
+      if (stadtmodusGilt(punkte)) {
+        kandidaten.push({
+          zusatz: '&alternativeidx=0&profile:vmax=' + STADT_VMAX, marke: 'Schleichweg'
+        });
+        kandidaten.push({
+          zusatz: '&alternativeidx=1&profile:vmax=' + STADT_VMAX, marke: 'Schleichweg'
+        });
+      }
+      var anfragen = kandidaten.map(function (k) {
         return fetch(BROUTER + '?lonlats=' + ll + '&profile=' + prof +
-                     '&format=geojson&timode=2' + zusatz + nogos)
+                     '&format=geojson&timode=2' + k.zusatz + nogos)
           .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (g) { return g ? { geo: g, marke: k.marke } : null; })
           .catch(function () { return null; });
       });
 
@@ -479,11 +515,12 @@
         }
 
         var roh = [];
-        ergebnisse.forEach(function (g) {
-          var f = g && g.features && g.features[0];
+        ergebnisse.forEach(function (e) {
+          var f = e && e.geo && e.geo.features && e.geo.features[0];
           if (!f) return;
           var pr = f.properties || {};
           roh.push({
+            marke: e.marke,
             koord: f.geometry.coordinates.map(function (c) { return [c[1], c[0]]; }),
             hinweise: pr.voicehints || [],
             km: parseInt(pr['track-length'] || 0, 10) / 1000,
@@ -497,12 +534,34 @@
           return;
         }
 
-        varianten = verschiedene(roh).slice(0, 3);
+        varianten = auswaehlen(verschiedene(roh));
         variante = 0;
         variantenWaehlen(0);
         umgebungNachladen(varianten[0]);
       });
     });
+  }
+
+  // Drei Vorschläge auswählen. Nach Fahrzeit sortiert, aber der Schleichweg
+  // wird nicht verdrängt: er ist auf dem Papier immer langsamer (er meidet ja
+  // die schnellen Strassen) und wäre sonst nie dabei - obwohl er im Stau
+  // genau der Vorschlag ist, um den es geht.
+  function auswaehlen(liste) {
+    var raus = liste.slice(0, 3);
+    if (raus.some(function (v) { return v.marke; })) return raus;
+    var schleich = liste.find(function (v) { return v.marke; });
+    if (schleich) raus[Math.min(2, raus.length)] = schleich;
+    return raus.filter(Boolean);
+  }
+
+  // Stadtmodus lohnt nur auf kurzen Strecken. Massstab ist die Luftlinie
+  // ueber alle Punkte - die steht schon vor der ersten Anfrage fest.
+  function stadtmodusGilt(punkte) {
+    if (stadtmodus === 'aus') return false;
+    if (stadtmodus === 'an') return true;
+    var weit = 0;
+    for (var i = 1; i < punkte.length; i++) weit += abstand(punkte[i - 1], punkte[i]);
+    return weit < STADT_BIS_KM * 1000;
   }
 
   /* Aussortieren, was praktisch dieselbe Strecke ist. Ein Vergleich über
@@ -570,7 +629,8 @@
     var kuerzeste = varianten.reduce(function (a, c) { return c.km < a.km ? c : a; });
     varianten.forEach(function (v, i) {
       var b = document.createElement('button');
-      var etikett = v === schnellste ? 'schnell' : (v === kuerzeste ? 'kurz' : '');
+      var etikett = v.marke ? v.marke
+                  : (v === schnellste ? 'schnell' : (v === kuerzeste ? 'kurz' : ''));
       var zusatz = v.art.wohn > 400
         ? '<br><span class="klein">' + (v.art.wohn / 1000).toFixed(1) + ' km klein</span>' : '';
       b.innerHTML = (etikett ? '<b>' + etikett + '</b><br>' : '') +
@@ -880,6 +940,12 @@
       else { sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); if (ziel) route(); }
     };
 
+    $('s-stadt').onchange = function () {
+      stadtmodus = this.value;
+      merken('stadt', stadtmodus);
+      if (ziel) route();
+    };
+
     $('s-schwelle').onchange = function () {
       schwelle = parseInt(this.value, 10) || 5;
       merken('schwelle', schwelle);
@@ -939,6 +1005,7 @@
     verkehrAn   = geholt('verkehr', '1') === '1';
     sprache     = geholt('sprache', '0') === '1';
     schwelle    = parseInt(geholt('schwelle', '5'), 10) || 5;
+    stadtmodus  = geholt('stadt', 'auto');
     tomtomKey   = geholt('tomtom', '');
 
     kartenAufbau();
@@ -948,6 +1015,7 @@
     schalter('s-blitzer', blitzWarnen); $('s-blitzer').textContent = blitzWarnen ? 'an' : 'aus';
     schalter('s-verkehr', verkehrAn);   $('s-verkehr').textContent = verkehrAn ? 'an' : 'aus';
     $('s-schwelle').value = String(schwelle);
+    $('s-stadt').value = stadtmodus;
     $('s-tomtom').value = tomtomKey;
     if (tomtomKey) $('s-tomtom-hinweis').textContent =
       'Schlüssel hinterlegt – Staus werden auch auf Land- und Stadtstraßen erkannt.';
