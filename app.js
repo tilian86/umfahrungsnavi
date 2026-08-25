@@ -79,6 +79,7 @@
   var fahrmodus = false, drehung = 0, zoomStufe = 0, tempoKmh = 0;
   var kumWeg = [], limits = [], limitAktuell = null, limitGesagt = null;
   var verkehrKarteAn = true;
+  var modus = 'auto';                    // 'auto' | 'rad'
 
   function $(id) { return document.getElementById(id); }
   var infoStand = 0;
@@ -477,6 +478,7 @@
 
   /* ------------------------------------------------------------------ Verkehr */
   function verkehrPruefen(stillschweigend) {
+    if (modus === 'rad') return;         // Stau interessiert das Rad nicht
     if (!verkehrAn || !routePunkte.length || verkehrLaeuft) return;
     verkehrLaeuft = true;
     letzterVerkehr = Date.now();
@@ -549,7 +551,7 @@
   function blitzerZeichnen() {
     blitzMarken.forEach(function (mk) { mk.remove(); });
     blitzMarken = [];
-    if (!blitzWarnen) return;
+    if (!blitzWarnen || modus === 'rad') return;
     blitzer.forEach(function (b) {
       var el = document.createElement('div');
       el.className = 'blitz-punkt' + (b.mobil ? ' mobil' : '');
@@ -563,7 +565,7 @@
   // Standorten die Messrichtung fest; wo sie fehlt, wird über den Kurs
   // entschieden, um Gegenrichtungs-Fehlalarme zu vermeiden.
   function blitzPruefen(ll) {
-    if (!blitzWarnen || !blitzer.length) { $('blitzfahne').hidden = true; return; }
+    if (!blitzWarnen || modus === 'rad' || !blitzer.length) { $('blitzfahne').hidden = true; return; }
     var naechster = null, nd = Infinity;
     blitzer.forEach(function (b) {
       var d = abstand(ll, b.ort);
@@ -670,7 +672,8 @@
     var ll = punkte.map(function (p) { return p[1] + ',' + p[0]; }).join('|');
     var nogos = nogoParameter();
 
-    profilBesorgen(false).then(function (prof) {
+    var radfahrt = modus === 'rad';
+    (radfahrt ? Promise.resolve('trekking') : profilBesorgen(false)).then(function (prof) {
       // Mehrere Kandidaten, damit am Ende wirklich drei *verschiedene* übrig
       // bleiben. BRouters Alternativen ähneln sich oft; die Anfrage ohne
       // Autobahn bringt fast immer eine echte Alternative.
@@ -680,7 +683,8 @@
         { zusatz: '&alternativeidx=2', marke: '' },
         { zusatz: '&alternativeidx=0&profile:avoid_motorways=1', marke: '' }
       ];
-      if (stadtmodusGilt(punkte)) {
+      if (radfahrt) kandidaten = kandidaten.slice(0, 3);   // Autobahn-Variante sinnlos
+      if (!radfahrt && stadtmodusGilt(punkte)) {
         kandidaten.push({
           zusatz: '&alternativeidx=0&profile:vmax=' + STADT_VMAX, marke: 'Schleichweg'
         });
@@ -711,7 +715,7 @@
           // Profil bei BRouter weggeraeumt? Einmal neu hochladen, dann nochmal.
           // Nur einmal - wenn BRouter selbst nicht antwortet (Wartung,
           // Drosselung), wuerde das sonst endlos kreisen.
-          if (prof !== ERSATZPROFIL && !profilNeuVersucht) {
+          if (!radfahrt && prof !== ERSATZPROFIL && !profilNeuVersucht) {
             profilNeuVersucht = true;
             merken('profilid', '');
             return profilBesorgen(true).then(function () { route(); });
@@ -734,6 +738,7 @@
             hinweise: pr.voicehints || [],
             km: parseInt(pr['track-length'] || 0, 10) / 1000,
             min: Math.round(parseInt(pr['total-time'] || 0, 10) / 60),
+            auf: parseInt(pr['filtered ascend'] || 0, 10),
             messages: pr.messages || null,
             art: streckenArt(pr.messages)
           });
@@ -783,12 +788,13 @@
 
   /* ------------------------------------------------------- Notlauf: OSRM */
   var OSRM = 'https://routing.openstreetmap.de/routed-car/route/v1/driving/';
+  var OSRM_RAD = 'https://routing.openstreetmap.de/routed-bike/route/v1/driving/';
   var OSRM_WINKEL = { 'uturn': 180, 'sharp right': 135, 'right': 90, 'slight right': 45,
                       'straight': 0, 'slight left': -45, 'left': -90, 'sharp left': -135 };
 
   function osrmRoute(punkte, lauf) {
     var koords = punkte.map(function (p) { return p[1] + ',' + p[0]; }).join(';');
-    return fetch(OSRM + koords + '?overview=full&geometries=geojson&steps=true&alternatives=true')
+    return fetch((modus === 'rad' ? OSRM_RAD : OSRM) + koords + '?overview=full&geometries=geojson&steps=true&alternatives=true')
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
         if (lauf !== laeuft) return;
@@ -903,8 +909,10 @@
       var b = document.createElement('button');
       var etikett = v.marke ? v.marke
                   : (v === schnellste ? 'schnell' : (v === kuerzeste ? 'kurz' : ''));
-      var zusatz = v.art.wohn > 400
-        ? '<br><span class="klein">' + (v.art.wohn / 1000).toFixed(1) + ' km klein</span>' : '';
+      var zusatz = modus === 'rad'
+        ? '<br><span class="klein">' + (v.auf || 0) + ' m ↑</span>'
+        : (v.art.wohn > 400
+            ? '<br><span class="klein">' + (v.art.wohn / 1000).toFixed(1) + ' km klein</span>' : '');
       b.innerHTML = (etikett ? '<b>' + etikett + '</b><br>' : '') +
                     v.min + ' min<br>' + uhrzeit(v.min) + '<br>' +
                     v.km.toFixed(1) + ' km' + zusatz;
@@ -931,7 +939,7 @@
     abseitsZaehler = 0;
     gesagt = {};
     hinweise = hinweiseBauen(v);
-    spurenAnheften([standort || v.koord[0]].concat(stopps.map(function (sp) { return sp.ort; }), [ziel || v.koord[v.koord.length - 1]]));
+    if (modus === 'auto') spurenAnheften([standort || v.koord[0]].concat(stopps.map(function (sp) { return sp.ort; }), [ziel || v.koord[v.koord.length - 1]]));
 
     variantenZeigen();
     var zusatz = '';
@@ -950,7 +958,7 @@
   // sonst wuerde jede Neuberechnung waehrend der Fahrt neue Abfragen ausloesen
   // und Overpass sperrt einen aus.
   function umgebungNachladen(v) {
-    window.Verkehr.blitzerLaden(routePunkte, 25).then(function (b) {
+    if (modus === 'auto') window.Verkehr.blitzerLaden(routePunkte, 25).then(function (b) {
       blitzer = b;
       blitzerZeichnen();
       if (b.length) info($('status').textContent + ' · ' + b.length + ' Blitzer');
@@ -1010,6 +1018,7 @@
     ecke.hidden = false;
     $('tempojetzt').textContent = tempoKmh > 2 ? Math.round(tempoKmh) : '–';
 
+    if (modus === 'rad') { $('temposchild').hidden = true; return; }
     var best = null, bestD = Infinity;
     for (var i = 0; i < limits.length; i++) {
       var d = abstand(ll, limits[i].ort);
@@ -1200,7 +1209,7 @@
     // Zweimal ansagen: mit Vorlauf zum Einordnen, und kurz davor.
     var anhang = (h.einordnen ? ', ' + h.einordnen : '') +
                  (h.danach ? ', dann ' + h.danach : '');
-    if (besteD < Math.max(250, tempoKmh * 4.5) && !gesagt['ton' + beste]) {
+    if (besteD < Math.max(modus === 'rad' ? 110 : 250, tempoKmh * 4.5) && !gesagt['ton' + beste]) {
       gesagt['ton' + beste] = true;
       sagen('In ' + Math.round(besteD / 10) * 10 + ' Metern ' + h.text + anhang);
     } else if (besteD < Math.max(60, tempoKmh * 1.2) && !gesagt['jetzt' + beste]) {
@@ -1402,6 +1411,17 @@
       if (!blitzWarnen) $('blitzfahne').hidden = true;
     };
 
+    $('s-modus').onclick = function () {
+      modus = modus === 'auto' ? 'rad' : 'auto';
+      $('s-modus').textContent = modus === 'auto' ? '🚗 Auto' : '🚲 Rad';
+      merken('modus', modus);
+      if (modus === 'rad') { sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic'); }
+      blitzerZeichnen();
+      if (ziel) route();
+      info(modus === 'rad' ? 'Fahrradmodus – ohne Stau, Blitzer und Tempolimits'
+                           : 'Automodus');
+    };
+
     $('s-verkehrkarte').onclick = function () {
       verkehrKarteAn = !verkehrKarteAn;
       $('s-verkehrkarte').textContent = verkehrKarteAn ? 'an' : 'aus';
@@ -1496,6 +1516,7 @@
     blitzWarnen = geholt('blitzer', '1') === '1';
     verkehrAn   = geholt('verkehr', '1') === '1';
     verkehrKarteAn = geholt('verkehrkarte', '1') === '1';
+    modus = geholt('modus', 'auto');
     sprache     = geholt('sprache', '0') === '1';
     schwelle    = parseInt(geholt('schwelle', '5'), 10) || 5;
     stadtmodus  = geholt('stadt', 'auto');
@@ -1519,6 +1540,7 @@
     schalter('s-blitzer', blitzWarnen); $('s-blitzer').textContent = blitzWarnen ? 'an' : 'aus';
     schalter('s-verkehr', verkehrAn);   $('s-verkehr').textContent = verkehrAn ? 'an' : 'aus';
     schalter('s-verkehrkarte', verkehrKarteAn); $('s-verkehrkarte').textContent = verkehrKarteAn ? 'an' : 'aus';
+    $('s-modus').textContent = modus === 'auto' ? '🚗 Auto' : '🚲 Rad';
     $('s-schwelle').value = String(schwelle);
     $('s-stadt').value = stadtmodus;
     $('s-tomtom').value = tomtomKey;
