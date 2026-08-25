@@ -407,7 +407,16 @@
     var vorne = routePunkte.slice(standort ? routenIndex(standort) : 0);
     if (vorne.length < 2) { verkehrLaeuft = false; return; }
 
-    window.Verkehr.alleStoerungen(vorne, routeRefs, tomtomKey, schwelle)
+    // Vorausschau: bei langen Fahrten reichen 15 km (weiter vorn aendert sich
+    // die Lage bis zum Eintreffen ohnehin). Bei kurzen Fahrten muss aber die
+    // GANZE Reststrecke geprueft werden - sonst faellt ausgerechnet der
+    // zaehe Zielbereich durchs Raster, wie bei Tuebingen -> Reutlingen (15,9 km).
+    var restKm = 0;
+    for (var i = 1; i < vorne.length; i++) restKm += abstand(vorne[i - 1], vorne[i]);
+    restKm /= 1000;
+    var sichtKm = restKm <= 25 ? restKm + 1 : 15;
+
+    window.Verkehr.alleStoerungen(vorne, routeRefs, tomtomKey, schwelle, sichtKm)
       .then(function (stoerungen) {
         verkehrLaeuft = false;
         $('k-verkehr').classList.remove('an');
@@ -661,6 +670,13 @@
   // die schnellen Strassen) und wäre sonst nie dabei - obwohl er im Stau
   // genau der Vorschlag ist, um den es geht.
   function auswaehlen(liste) {
+    var schnellste = liste[0] ? liste[0].min : 0;
+    // Einen Schleichweg, der fast doppelt so lange dauert, will niemand -
+    // das passiert auf Strecken mit viel Schnellstrasse, wo das gedeckelte
+    // Rechentempo die ganze Route ausbremst statt nur den Stau zu umgehen.
+    liste = liste.filter(function (v) {
+      return !v.marke || !schnellste || v.min <= schnellste * 1.6;
+    });
     var raus = liste.slice(0, 3);
     if (raus.some(function (v) { return v.marke; })) return raus;
     var schleich = liste.find(function (v) { return v.marke; });
@@ -731,14 +747,19 @@
   /* Aussortieren, was praktisch dieselbe Strecke ist. Ein Vergleich über
    * km und Minuten reicht dafür nicht - zwei Wege können gleich lang sein und
    * trotzdem völlig anders verlaufen. Deshalb über die tatsächliche
-   * Überdeckung: wer sich zu über 80 % mit einer schon vorhandenen Variante
-   * deckt, fliegt raus. */
+   * Überdeckung: wer sich zu über 90 % mit einer schon vorhandenen Variante
+   * deckt, fliegt raus.
+   *
+   * 90 und nicht 80: gemessen an Tübingen -> Reutlingen liegen BRouters
+   * Alternativen bei 83 %, 82 % und 99 % Überdeckung. Nur die 99er ist
+   * wirklich dieselbe Strecke - bei 80 % wären auch die beiden echten
+   * Alternativen verschwunden, und es blieb nur ein Vorschlag übrig. */
   function verschiedene(liste) {
     liste.sort(function (a, b) { return a.min - b.min; });
     var raus = [];
     liste.forEach(function (v) {
       v.raster = rasterMenge(v.koord);
-      var doppelt = raus.some(function (r) { return ueberdeckung(v.raster, r.raster) > 0.8; });
+      var doppelt = raus.some(function (r) { return ueberdeckung(v.raster, r.raster) > 0.9; });
       if (!doppelt) raus.push(v);
     });
     return raus;

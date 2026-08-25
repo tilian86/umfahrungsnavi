@@ -483,10 +483,10 @@
   }
 
   /* ------------------------------------------------------------- Buendelung */
-  function alleStoerungen(route, refs, schluessel, schwelle) {
+  function alleStoerungen(route, refs, schluessel, schwelle, sichtKm) {
     return Promise.all([
       autobahnStoerungen(refs, route, schwelle),
-      tomtomFluss(route, schluessel, schwelle, 15),
+      tomtomFluss(route, schluessel, schwelle, sichtKm || 15),
       ticStoerungen(route, schwelle)
     ]).then(function (teile) {
       var alle = teile[0].concat(teile[1], teile[2]);
@@ -507,6 +507,7 @@
     blitzerLaden: blitzerLaden,
     refsErmitteln: refsErmitteln,
     autobahnStoerungen: autobahnStoerungen,
+    ticStoerungen: ticStoerungen,
     tomtomFluss: tomtomFluss,
     alleStoerungen: alleStoerungen,
     abstand: abstand,

@@ -4,11 +4,11 @@
  * werden, sonst mischt GitHub Pages alte und neue Staende. Sie gehoert
  * zusammen mit den ?v=-Marken in index.html angefasst.
  */
-var VERSION = 'un-v8';
+var VERSION = 'un-v12';
 var GERUEST = [
-  './', './index.html', './app.js?v=8', './stil.css?v=8',
-  './verkehr.js?v=8', './pruefstand.js?v=8', './profil/umfahrung.brf',
-  './leaflet/leaflet.js?v=8', './leaflet/leaflet.css?v=8',
+  './', './index.html', './app.js?v=12', './stil.css?v=12',
+  './verkehr.js?v=12', './pruefstand.js?v=12', './profil/umfahrung.brf',
+  './leaflet/leaflet.js?v=12', './leaflet/leaflet.css?v=12',
   './manifest.json', './icons/Icon-192.png'
 ];
 
