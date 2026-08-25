@@ -163,6 +163,7 @@ html, body {
                 font-weight: 560; text-align: center; }
 #fahnen > div[hidden] { display: none; }
 #blitzfahne { background: rgba(230, 170, 20, .95); color: #1a1400; }
+#ersatzfahne { background: rgba(120, 90, 160, .95); font-size: 12.5px; }
 #stoerfahne { background: rgba(200, 45, 45, .94); }
 
 /* ------------------------------------------------------------ Zwischenziele */

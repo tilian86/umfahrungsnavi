@@ -10,12 +10,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Staufunk">
-  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=7">
+  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=8">
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <link rel="manifest" href="manifest.json">
   <title>Staufunk</title>
-  <link rel="stylesheet" href="leaflet/leaflet.css?v=7">
-  <link rel="stylesheet" href="stil.css?v=7">
+  <link rel="stylesheet" href="leaflet/leaflet.css?v=8">
+  <link rel="stylesheet" href="stil.css?v=8">
 </head>
 <body>
 
@@ -33,6 +33,7 @@
 
   <!-- Blitzer- und Stauhinweise -->
   <div id="fahnen">
+    <div id="ersatzfahne" hidden></div>
     <div id="blitzfahne" hidden></div>
     <div id="stoerfahne" hidden></div>
   </div>
@@ -118,11 +119,11 @@
     </div>
   </div>
 
-  <script src="leaflet/leaflet.js?v=7"></script>
-  <script src="verkehr.js?v=7"></script>
+  <script src="leaflet/leaflet.js?v=8"></script>
+  <script src="verkehr.js?v=8"></script>
   <!-- tut nichts, ausser die Adresse enthaelt ?pruefstand -->
-  <script src="pruefstand.js?v=7"></script>
-  <script src="app.js?v=7"></script>
+  <script src="pruefstand.js?v=8"></script>
+  <script src="app.js?v=8"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {

@@ -73,6 +73,7 @@
   var tomtomKey = '';
   var profilId = null;
   var profilNeuVersucht = false;
+  var brouterGrund = '';
   var abseitsZaehler = 0, letzteNeu = 0, laeuft = 0;
   var vorschlagTimer = null, letzteSuche = 0;
   var verkehrTimer = null, letzterVerkehr = 0, verkehrLaeuft = false;
@@ -364,6 +365,16 @@
     stoerfahne();
   }
 
+  // Sichtbar machen, wenn nur der Ersatzdienst laeuft. Sonst wundert man
+  // sich, warum ploetzlich die drei Vorschlaege fehlen und keine Umfahrung
+  // mehr greift - genau das ist im Betrieb passiert.
+  function ersatzfahne(an, grund) {
+    var f = $('ersatzfahne');
+    f.hidden = !an;
+    if (an) f.textContent = '⚠︎ Ersatzdienst' + (grund ? ' · ' + grund : '') +
+                            ' · nur eine Route, keine Stauumfahrung';
+  }
+
   function stoerfahne() {
     var f = $('stoerfahne');
     if (!sperren.length) { f.hidden = true; return; }
@@ -584,7 +595,16 @@
       var anfragen = kandidaten.map(function (k) {
         return fetch(BROUTER + '?lonlats=' + ll + '&profile=' + prof +
                      '&format=geojson&timode=2' + k.zusatz + nogos)
-          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (r) {
+            if (!r.ok) {
+              // 403 ist BRouters eigene Drosselung ("Please, retry later!"),
+              // sie haengt an der IP und loest sich von selbst wieder.
+              brouterGrund = r.status === 403 ? 'BRouter drosselt gerade'
+                                              : 'BRouter antwortet nicht';
+              return null;
+            }
+            return r.json();
+          })
           .then(function (g) { return g ? { geo: g, marke: k.marke } : null; })
           .catch(function () { return null; });
       });
@@ -627,6 +647,7 @@
           return;
         }
 
+        ersatzfahne(false);
         varianten = auswaehlen(verschiedene(roh));
         variante = 0;
         variantenWaehlen(0);
@@ -686,7 +707,7 @@
         });
         variante = 0;
         variantenWaehlen(0);
-        info($('status').textContent + ' · Ersatzdienst, Stauumfahrung eingeschränkt');
+        ersatzfahne(true, brouterGrund);
         umgebungNachladen(varianten[0]);
       })
       .catch(function () { info('Routendienst nicht erreichbar'); });
