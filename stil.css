@@ -225,3 +225,6 @@ html, body {
   border: 1px solid rgba(255,255,255,.14); background: rgba(38,44,52,.95); color: #f2f4f6;
   -webkit-appearance: none; appearance: none; width: 100%;
 }
+
+/* Mobile Blitzer stechen heraus - die wechseln taeglich */
+.blitz-punkt.mobil { background: #e6452e; color: #fff; }

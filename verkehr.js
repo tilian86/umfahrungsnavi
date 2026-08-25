@@ -87,11 +87,54 @@
   // merken und bei einer aehnlichen Route nicht erneut fragen.
   var blitzSpeicher = { kennung: null, treffer: [] };
 
+  // Primaer blitzer.de (atudo): kennt neben den festen auch die MOBILEN
+  // Blitzer des Tages - das kann OpenStreetMap nicht. Typen 1-6 fest,
+  // 20-26 mobil/teilstationaer. Ein Rechteck um die naechsten Kilometer,
+  // danach auf den Korridor gefiltert.
+  function atudoLaden(vorne) {
+    var minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
+    vorne.forEach(function (p) {
+      if (p[0] < minLat) minLat = p[0]; if (p[0] > maxLat) maxLat = p[0];
+      if (p[1] < minLon) minLon = p[1]; if (p[1] > maxLon) maxLon = p[1];
+    });
+    var box = (minLat - 0.01) + ',' + (minLon - 0.01) + ',' +
+              (maxLat + 0.01) + ',' + (maxLon + 0.01);
+    return fetch('https://cdn2.atudo.net/api/4.0/pois.php?type=1,2,3,4,5,6,20,21,22,23,24,25,26&box=' + box)
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (d) {
+        return (d.pois || []).filter(function (x) { return x.type !== 'cluster'; })
+          .map(function (x) {
+            var mobil = parseInt(x.type, 10) >= 20;
+            return {
+              ort: [parseFloat(x.lat), parseFloat(x.lng)],
+              tempo: parseInt(x.vmax, 10) || null,
+              richtung: [],
+              mobil: mobil
+            };
+          })
+          .filter(function (b) {
+            if (isNaN(b.ort[0])) return false;
+            // nur was am Weg liegt
+            var lage = anDerRoute(b.ort, vorne);
+            return lage.abstand < 300;
+          });
+      });
+  }
+
   function blitzerLaden(route, maxKm) {
     if (!route || route.length < 2) return Promise.resolve([]);
     var vorne = kuerzen(route, maxKm || 25);
     var kennung = kennungVon(vorne);
     if (blitzSpeicher.kennung === kennung) return Promise.resolve(blitzSpeicher.treffer);
+
+    return atudoLaden(vorne).then(function (treffer) {
+      blitzSpeicher = { kennung: kennung, treffer: treffer };
+      return treffer;
+    }).catch(function () { return blitzerLadenOSM(vorne, kennung); });
+  }
+
+  // Rueckfall auf OpenStreetMap, falls atudo nicht antwortet
+  function blitzerLadenOSM(vorne, kennung) {
 
     var stuetzen = ausduennen(vorne, 900)
       .map(function (p) { return p[0].toFixed(5) + ',' + p[1].toFixed(5); }).join(',');
@@ -373,13 +416,80 @@
     }).catch(function () { return []; });
   }
 
+  /* --------------------- 1b. Landesmeldestelle BW: Sperrungen & Unfaelle */
+  // Amtliche Meldungen des Landes, offen und ohne Schluessel - und anders als
+  // die Autobahn-Schnittstelle auch fuer Bundes-, Land- und Stadtstrassen.
+  // Aber: dort stehen nur gemeldete Ereignisse (Sperrung, Unfall, Baustelle),
+  // keine Rush-Hour-Staus. Die Datei ist 1,3 MB gross, deshalb hoechstens
+  // alle zehn Minuten frisch.
+  var TIC = 'https://api.mobidata-bw.de/datasets/traffic/incidents-bw/TIC3-Meldungen.xml';
+  var ticSpeicher = { stand: 0, meldungen: [] };
+
+  function ticLaden() {
+    if (Date.now() - ticSpeicher.stand < 600000) return Promise.resolve(ticSpeicher.meldungen);
+    return fetch(TIC)
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+      .then(function (xml) {
+        var dom = new DOMParser().parseFromString(xml, 'text/xml');
+        var raus = [];
+        var events = dom.getElementsByTagName('TrafficAndTravelEvent');
+        for (var i = 0; i < events.length; i++) {
+          var e = events[i];
+          var textEl = e.getElementsByTagName('Text')[0];
+          var text = textEl ? textEl.textContent.replace(/\s+/g, ' ').trim() : '';
+          var lats = e.getElementsByTagName('Latitude');
+          var lons = e.getElementsByTagName('Longitude');
+          var orte = [];
+          for (var j = 0; j < Math.min(lats.length, lons.length); j += 4) {
+            var la = parseFloat(lats[j].textContent), lo = parseFloat(lons[j].textContent);
+            if (!isNaN(la)) orte.push([la, lo]);
+          }
+          if (orte.length) raus.push({ text: text, orte: orte });
+        }
+        ticSpeicher = { stand: Date.now(), meldungen: raus };
+        return raus;
+      })
+      .catch(function () { return ticSpeicher.meldungen; });
+  }
+
+  function ticStoerungen(route, schwelle) {
+    return ticLaden().then(function (meldungen) {
+      var raus = [];
+      meldungen.forEach(function (m) {
+        var beste = null;
+        m.orte.forEach(function (o) {
+          var lage = anDerRoute(o, route);
+          if (lage.abstand < 300 && (!beste || lage.abstand < beste.abstand)) {
+            beste = { ort: o, index: lage.index, abstand: lage.abstand };
+          }
+        });
+        if (!beste) return;
+        var t = m.text.toLowerCase();
+        var hart = t.indexOf('gesperrt') >= 0 || t.indexOf('vollsperrung') >= 0;
+        var minuten = hart ? 0 : (t.indexOf('stau') >= 0 ? 10 :
+                      t.indexOf('unfall') >= 0 ? 8 :
+                      t.indexOf('stockend') >= 0 ? 5 : 0);
+        if (!hart && minuten < schwelle) return;
+        raus.push({
+          ort: beste.ort, index: beste.index,
+          minuten: minuten, tempo: null, hart: hart,
+          radius: hart ? 300 : STADT_RADIUS,
+          text: (hart ? 'Sperrung' : 'Störung') + ' · ' + m.text.slice(0, 60),
+          quelle: 'tic'
+        });
+      });
+      return raus;
+    });
+  }
+
   /* ------------------------------------------------------------- Buendelung */
   function alleStoerungen(route, refs, schluessel, schwelle) {
     return Promise.all([
       autobahnStoerungen(refs, route, schwelle),
-      tomtomFluss(route, schluessel, schwelle, 15)
+      tomtomFluss(route, schluessel, schwelle, 15),
+      ticStoerungen(route, schwelle)
     ]).then(function (teile) {
-      var alle = teile[0].concat(teile[1]);
+      var alle = teile[0].concat(teile[1], teile[2]);
       // Doppelte aussortieren: melden Autobahn-API und TomTom denselben Stau,
       // gewinnt die amtliche Meldung, weil sie die Minuten sauberer kennt.
       // Doppelte aussortieren: melden Autobahn-API und TomTom denselben Stau,

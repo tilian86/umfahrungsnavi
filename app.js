@@ -72,6 +72,7 @@
   var stadtmodus = 'auto';               // 'auto' | 'an' | 'aus'
   var tomtomKey = '';
   var profilId = null;
+  var profilNeuVersucht = false;
   var abseitsZaehler = 0, letzteNeu = 0, laeuft = 0;
   var vorschlagTimer = null, letzteSuche = 0;
   var verkehrTimer = null, letzterVerkehr = 0, verkehrLaeuft = false;
@@ -339,7 +340,7 @@
         verkehrLaeuft = false;
         $('k-verkehr').classList.remove('an');
         var vorher = sperren.filter(function (s) { return s.quelle !== 'hand'; }).length;
-        sperrenLeeren('autobahn'); sperrenLeeren('tomtom');
+        sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic');
         stoerungen.forEach(sperreHinzufuegen);
 
         if (!stoerungen.length) {
@@ -391,7 +392,8 @@
     blitzer.forEach(function (b) {
       blitzMarken.push(L.marker(b.ort, {
         icon: L.divIcon({ className: '', iconSize: [22, 22], iconAnchor: [11, 11],
-                          html: '<div class="blitz-punkt">' + (b.tempo || '!') + '</div>' }),
+                          html: '<div class="blitz-punkt' + (b.mobil ? ' mobil' : '') + '">' +
+                                (b.tempo || '!') + '</div>' }),
         interactive: false
       }).addTo(karte));
     });
@@ -417,13 +419,14 @@
     var f = $('blitzfahne');
     if (!naechster) { f.hidden = true; return; }
     f.hidden = false;
-    f.textContent = '📷 Blitzer in ' + Math.round(nd / 10) * 10 + ' m' +
+    f.textContent = '📷 ' + (naechster.mobil ? 'Mobiler Blitzer' : 'Blitzer') +
+                    ' in ' + Math.round(nd / 10) * 10 + ' m' +
                     (naechster.tempo ? ' · Tempo ' + naechster.tempo : '');
     var schluessel = 'blitz' + naechster.ort[0].toFixed(5);
     if (nd < 350 && !gesagt[schluessel]) {
       gesagt[schluessel] = true;
-      sagen(naechster.tempo ? 'Achtung, Blitzer. Tempo ' + naechster.tempo
-                            : 'Achtung, Blitzer voraus');
+      sagen('Achtung, ' + (naechster.mobil ? 'mobiler Blitzer' : 'Blitzer') +
+            (naechster.tempo ? '. Tempo ' + naechster.tempo : ' voraus'));
     }
   }
 
@@ -446,7 +449,14 @@
         merken('profilid', profilId);
         return profilId;
       })
-      .catch(function () { profilId = ERSATZPROFIL; return profilId; });
+      .catch(function () {
+        // Auch die gemerkte Kennung wegwerfen - sonst liefert der naechste
+        // Aufruf wieder die alte, tote Kennung und es entsteht eine Schleife
+        // aus Fehlversuch und Neuversuch.
+        merken('profilid', '');
+        profilId = ERSATZPROFIL;
+        return profilId;
+      });
   }
 
   /* ----------------------------------------------------------------- Routing */
@@ -468,7 +478,7 @@
     nebenlinien.forEach(function (l) { karte.removeLayer(l); });
     nebenlinien = [];
     blitzerZeichnen();
-    sperrenLeeren('autobahn'); sperrenLeeren('tomtom');
+    sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic');
     $('varianten').hidden = true;
     $('banner').hidden = true;
     $('blitzfahne').hidden = true;
@@ -515,10 +525,21 @@
 
       Promise.all(anfragen).then(function (ergebnisse) {
         if (lauf !== laeuft) return;               // eine neuere Anfrage läuft
-        if (!ergebnisse.some(Boolean) && prof !== ERSATZPROFIL) {
-          // Profil bei BRouter weggeräumt? Einmal neu hochladen, dann nochmal.
-          return profilBesorgen(true).then(function () { route(); });
+        if (!ergebnisse.some(Boolean)) {
+          // Profil bei BRouter weggeraeumt? Einmal neu hochladen, dann nochmal.
+          // Nur einmal - wenn BRouter selbst nicht antwortet (Wartung,
+          // Drosselung), wuerde das sonst endlos kreisen.
+          if (prof !== ERSATZPROFIL && !profilNeuVersucht) {
+            profilNeuVersucht = true;
+            merken('profilid', '');
+            return profilBesorgen(true).then(function () { route(); });
+          }
+          // Notlauf: der offene OSRM-Dienst der FOSSGIS rechnet die Route.
+          // Keine Sperrzonen, kein Schleichweg - aber Karte, Fuehrung und
+          // Ansagen bleiben am Leben, statt dass gar nichts mehr geht.
+          return osrmRoute(punkte, lauf);
         }
+        profilNeuVersucht = false;
 
         var roh = [];
         ergebnisse.forEach(function (e) {
@@ -568,6 +589,56 @@
     var weit = 0;
     for (var i = 1; i < punkte.length; i++) weit += abstand(punkte[i - 1], punkte[i]);
     return weit < STADT_BIS_KM * 1000;
+  }
+
+  /* ------------------------------------------------------- Notlauf: OSRM */
+  var OSRM = 'https://routing.openstreetmap.de/routed-car/route/v1/driving/';
+  var OSRM_WINKEL = { 'uturn': 180, 'sharp right': 135, 'right': 90, 'slight right': 45,
+                      'straight': 0, 'slight left': -45, 'left': -90, 'sharp left': -135 };
+
+  function osrmRoute(punkte, lauf) {
+    var koords = punkte.map(function (p) { return p[1] + ',' + p[0]; }).join(';');
+    return fetch(OSRM + koords + '?overview=full&geometries=geojson&steps=true&alternatives=true')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (lauf !== laeuft) return;
+        if (!d || !d.routes || !d.routes.length) {
+          info('Routendienst nicht erreichbar – später nochmal versuchen');
+          return;
+        }
+        varianten = d.routes.slice(0, 3).map(function (rt) {
+          return {
+            koord: rt.geometry.coordinates.map(function (c) { return [c[1], c[0]]; }),
+            hinweise: [],
+            osrmSteps: rt.legs.reduce(function (a, l) { return a.concat(l.steps || []); }, []),
+            km: rt.distance / 1000,
+            min: Math.round(rt.duration / 60),
+            messages: null,
+            art: { wohn: 0, anlieger: 0, gesamt: 0 },
+            marke: 'Ersatz'
+          };
+        });
+        variante = 0;
+        variantenWaehlen(0);
+        info($('status').textContent + ' · Ersatzdienst, Stauumfahrung eingeschränkt');
+        umgebungNachladen(varianten[0]);
+      })
+      .catch(function () { info('Routendienst nicht erreichbar'); });
+  }
+
+  function osrmHinweise(v) {
+    return v.osrmSteps.map(function (st) {
+      var man = st.maneuver || {};
+      if (man.type === 'depart' || man.type === 'arrive') return null;
+      var ort = [man.location[1], man.location[0]];
+      if (man.type === 'roundabout' || man.type === 'rotary') {
+        return { ort: ort, winkel: 0, kreis: true,
+                 text: 'im Kreisverkehr die ' + (ZAHLWORT[man.exit] || (man.exit || 1) + '.') + ' Ausfahrt' };
+      }
+      var w = OSRM_WINKEL[man.modifier];
+      if (w === undefined || w === 0) return null;
+      return { ort: ort, winkel: w, kreis: false, text: winkelText(w) };
+    }).filter(Boolean);
   }
 
   /* Aussortieren, was praktisch dieselbe Strecke ist. Ein Vergleich über
@@ -721,6 +792,14 @@
   }
 
   function hinweiseBauen(v) {
+    if (v.osrmSteps) {
+      var l = osrmHinweise(v);
+      l.forEach(function (h, i) {
+        var n = l[i + 1];
+        if (n && abstand(h.ort, n.ort) < 180) h.danach = n.text;
+      });
+      return l;
+    }
     var liste = v.hinweise.map(function (h) {
       var k = Math.min(h[0], v.koord.length - 1);
       var kreis = KREISVERKEHR[h[1]];
@@ -944,7 +1023,7 @@
       schalter('s-verkehr', verkehrAn);
       merken('verkehr', verkehrAn ? '1' : '0');
       if (verkehrAn) verkehrPruefen(false);
-      else { sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); if (ziel) route(); }
+      else { sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic'); if (ziel) route(); }
     };
 
     $('s-stadt').onchange = function () {
