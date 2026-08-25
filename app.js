@@ -624,8 +624,10 @@
   // Das eigene Profil wird beim ersten Start zu BRouter hochgeladen und die
   // Kennung gemerkt. BRouter räumt hochgeladene Profile irgendwann weg -
   // deshalb bei einem Fehlschlag einmal neu hochladen.
+  var PROFIL_VERSION = '2';   // bei jeder Aenderung an umfahrung.brf hochzaehlen
   function profilBesorgen(erzwingen) {
     var gemerkt = geholt('profilid', '');
+    if (geholt('profilv', '') !== PROFIL_VERSION) { gemerkt = ''; merken('profilv', PROFIL_VERSION); }
     if (gemerkt && !erzwingen) { profilId = gemerkt; return Promise.resolve(profilId); }
     return fetch(PROFIL_DATEI)
       .then(function (r) { return r.text(); })

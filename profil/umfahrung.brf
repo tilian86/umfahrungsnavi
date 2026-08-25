@@ -88,7 +88,10 @@ assign caraccess
                                    switch highway=secondary|secondary_link     1
                                    switch highway=tertiary|tertiary_link       1
                                    switch highway=unclassified                 1
-                                   switch and highway=track use_offroad        1
+                                   switch and highway=track
+                                          or use_offroad
+                                             or tracktype=grade1
+                                                surface=asphalt|paved|concrete|paving_stones 1
                                    switch and highway=road use_offroad         1
                                    switch route=ferry                          1
                                    switch isresidentialorliving                1
@@ -160,7 +163,8 @@ assign maxspeed_implicit =
   switch living_street=yes                  10
   switch isresidentialorliving              wohntempo
   switch highway=service                    wohntempo
-  switch highway=track|road|path switch tracktype=grade1 30 5
+  switch highway=track|road|path
+    switch or tracktype=grade1 surface=asphalt|paved|concrete|paving_stones 30 5
   0
 
 assign maxspeed_forward =
