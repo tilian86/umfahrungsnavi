@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <!-- viewport-fit=cover: sonst bleibt unter dem iPhone-Notch ein weisser Balken,
+       wenn die App vom Home-Bildschirm im Vollbild startet. -->
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta name="theme-color" content="#101418">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Umfahrung">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+  <link rel="icon" type="image/png" href="icons/Icon-192.png">
+  <link rel="manifest" href="manifest.json">
+  <title>Umfahrungsnavi</title>
+  <link rel="stylesheet" href="leaflet/leaflet.css?v=1">
+  <link rel="stylesheet" href="stil.css?v=1">
+</head>
+<body>
+
+  <div id="karte"></div>
+
+  <!-- Abbiegebanner: nur waehrend der Fahrt, bewusst gross und kontraststark -->
+  <div id="banner" hidden>
+    <div id="banner-pfeil">↑</div>
+    <div id="banner-text">
+      <div id="banner-entfernung">–</div>
+      <div id="banner-anweisung">–</div>
+    </div>
+  </div>
+
+  <!-- Sperrzonen-Hinweis, wenn eine Umfahrung erzwungen wird -->
+  <div id="sperrfahne" hidden></div>
+
+  <div id="unten">
+    <div id="suchzeile">
+      <input id="suche" type="search" placeholder="Ziel eingeben" autocomplete="off"
+             autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
+      <button id="suche-loeschen" title="Ziel loeschen" hidden>✕</button>
+    </div>
+    <div id="vorschlaege" hidden></div>
+
+    <div id="varianten" hidden></div>
+
+    <div id="status">Suche Standort …</div>
+
+    <div id="knoepfe">
+      <button id="k-folgen"  class="an">Folgen</button>
+      <button id="k-sprache">Ansage</button>
+      <button id="k-sperre">Stau hier</button>
+      <button id="k-uebersicht">Übersicht</button>
+      <button id="k-nacht">Nacht</button>
+    </div>
+  </div>
+
+  <script src="leaflet/leaflet.js?v=1"></script>
+  <script src="app.js?v=1"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('sw.js').catch(function () {});
+      });
+    }
+  </script>
+</body>
+</html>

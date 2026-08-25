@@ -1,0 +1,147 @@
+/* Umfahrungsnavi - Oberflaeche fuers Fahren.
+ *
+ * Leitgedanke: alles, was waehrend der Fahrt gelesen werden muss, ist gross
+ * und steht oben; alles zum Einstellen ist klein und steht unten, wo der
+ * Daumen hinreicht.
+ */
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0; padding: 0; height: 100%; overflow: hidden;
+  background: #101418; color: #f2f4f6;
+  font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* Verhindert das Gummiband-Scrollen von Safari ueber die Karte hinaus */
+  overscroll-behavior: none;
+  -webkit-user-select: none; user-select: none;
+}
+
+#karte { position: absolute; inset: 0; background: #101418; z-index: 0; }
+
+/* ------------------------------------------------------------- Abbiegebanner */
+/* Der Banner ueberdeckt oben einen Streifen Karte. Das ist Absicht: waehrend
+   der Fahrt ist die naechste Anweisung wichtiger als der Kartenausschnitt. */
+#banner {
+  position: absolute; z-index: 500;
+  top: 0; left: 0; right: 0;
+  padding: calc(env(safe-area-inset-top) + 10px) 14px 12px;
+  display: flex; align-items: center; gap: 14px;
+  background: rgba(16, 20, 24, .93);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(255,255,255,.1);
+}
+#banner[hidden] { display: none; }
+#banner-pfeil { font-size: 46px; line-height: 1; font-weight: 300; min-width: 52px; text-align: center; }
+#banner-text { min-width: 0; }
+#banner-entfernung { font-size: 30px; font-weight: 650; letter-spacing: -.02em; }
+#banner-anweisung {
+  font-size: 17px; opacity: .78; margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* Kurz vor dem Abbiegepunkt faerbt sich der Banner - das sieht man im
+   Augenwinkel, ohne hinzusehen. */
+#banner.gleich { background: rgba(210, 120, 0, .95); }
+#banner.gleich #banner-entfernung { font-size: 34px; }
+
+/* ------------------------------------------------------------- Sperrfahne */
+#sperrfahne {
+  position: absolute; z-index: 500; left: 12px; right: 12px;
+  top: calc(env(safe-area-inset-top) + 8px);
+  padding: 9px 12px; border-radius: 11px;
+  background: rgba(200, 45, 45, .94);
+  font-size: 14px; font-weight: 560; text-align: center;
+}
+#banner:not([hidden]) ~ #sperrfahne { top: calc(env(safe-area-inset-top) + 96px); }
+#sperrfahne[hidden] { display: none; }
+
+/* ------------------------------------------------------------- Untere Leiste */
+#unten {
+  position: absolute; z-index: 500; left: 0; right: 0; bottom: 0;
+  padding: 10px 12px calc(env(safe-area-inset-bottom) + 10px);
+  background: linear-gradient(to top, rgba(16,20,24,.96) 62%, rgba(16,20,24,0));
+  display: flex; flex-direction: column; gap: 8px;
+}
+
+#suchzeile { position: relative; display: flex; }
+#suche {
+  flex: 1; min-width: 0;
+  padding: 12px 38px 12px 14px; border-radius: 12px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(38,44,52,.95); color: #f2f4f6;
+  font-size: 16px;      /* 16px verhindert, dass iOS beim Tippen hineinzoomt */
+  -webkit-appearance: none; appearance: none;
+}
+#suche::placeholder { color: rgba(242,244,246,.45); }
+#suche::-webkit-search-cancel-button { display: none; }
+#suche-loeschen {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 32px; height: 32px; border: 0; border-radius: 8px;
+  background: transparent; color: rgba(242,244,246,.6); font-size: 16px;
+}
+
+#vorschlaege {
+  max-height: 42vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  border-radius: 12px; background: rgba(38,44,52,.98);
+  border: 1px solid rgba(255,255,255,.12);
+}
+#vorschlaege[hidden] { display: none; }
+#vorschlaege div {
+  padding: 12px 14px; font-size: 15px;
+  border-bottom: 1px solid rgba(255,255,255,.07);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#vorschlaege div:last-child { border-bottom: 0; }
+#vorschlaege div:active { background: rgba(255,255,255,.09); }
+
+/* Variantenwahl: drei Kacheln nebeneinander, die ausgewaehlte hebt sich ab */
+#varianten { display: flex; gap: 7px; }
+#varianten[hidden] { display: none; }
+#varianten button {
+  flex: 1; padding: 9px 5px; border-radius: 11px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(38,44,52,.95); color: #f2f4f6;
+  font-size: 12px; line-height: 1.35; font-family: inherit;
+}
+#varianten button.gewaehlt { background: #1f6feb; border-color: #1f6feb; }
+#varianten button b { font-size: 11px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
+#varianten button .warn { color: #ffb454; }
+#varianten button.gewaehlt .warn { color: #ffe0b0; }
+
+#status {
+  font-size: 12.5px; opacity: .72; min-height: 17px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+#knoepfe { display: flex; gap: 7px; }
+#knoepfe button {
+  flex: 1; padding: 11px 3px; border-radius: 11px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(38,44,52,.95); color: #f2f4f6;
+  font-size: 12.5px; font-family: inherit;
+}
+#knoepfe button.an { background: #1f6feb; border-color: #1f6feb; }
+#knoepfe button.warn { background: #c82d2d; border-color: #c82d2d; }
+
+/* Leaflet-Bedienelemente aus dem Weg raeumen - beim Fahren nutzt man sie nicht */
+.leaflet-control-container .leaflet-top { top: calc(env(safe-area-inset-top) + 4px); }
+.leaflet-control-zoom { display: none; }
+.leaflet-control-attribution {
+  background: rgba(16,20,24,.6) !important; color: rgba(242,244,246,.55) !important;
+  font-size: 9px !important;
+}
+.leaflet-control-attribution a { color: rgba(242,244,246,.75) !important; }
+
+/* Eigener Standortpunkt statt Leaflet-Nadel: bei Navigation zeigt der Kegel
+   die Fahrtrichtung, die Nadel koennte das nicht. */
+.ich-punkt {
+  width: 20px; height: 20px; border-radius: 50%;
+  background: #1f6feb; border: 3px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.35), 0 2px 6px rgba(0,0,0,.5);
+}
+.ich-kegel {
+  position: absolute; left: 50%; top: 50%;
+  width: 0; height: 0; margin: -30px 0 0 -13px;
+  border-left: 13px solid transparent; border-right: 13px solid transparent;
+  border-bottom: 26px solid rgba(31,111,235,.42);
+  transform-origin: 50% 100%;
+}
