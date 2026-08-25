@@ -1,69 +1,75 @@
-/* Umfahrungsnavi - Etappe 1: Grundgeruest.
+/* Umfahrungsnavi.
  *
- * Auto-Navi fuer eine Person. Anders als die grossen Navis darf es
- * kompromisslos durch Wohngebiete fuehren.
+ * Auto-Navi für eine Person. Anders als die grossen Navis darf es
+ * kompromisslos durch Wohngebiete führen.
  *
- * Dienste (alle ohne Schluessel, CORS geprueft):
- *   CARTO      Kartenbilder, hell und dunkel
- *   BRouter    Routing (Profil car-fast), Abbiegehinweise, Sperrzonen
- *   Nominatim  Adresssuche
+ * Dienste:
+ *   CARTO       Kartenbilder, hell und dunkel          — frei
+ *   BRouter     Routing, Sperrzonen, Abbiegehinweise   — frei
+ *   Nominatim   Adresssuche                            — frei
+ *   Autobahn    amtliche Staumeldungen (INRIX)         — frei, ohne Schlüssel
+ *   TomTom      Verkehrsfluss abseits der Autobahn     — Schlüssel nötig
+ *   Overpass    feste Blitzer, Strassenkennungen       — frei
  *
- * Der Kern des Vorhabens steckt in `sperren`: BRouter kennt einen Parameter
- * `nogos`, mit dem sich Bereiche verteuern lassen - hart oder mit Gewicht.
- * Damit muss die Routing-Maschine nichts von Verkehr wissen. In Etappe 1
- * setzt man die Sperren von Hand ("Stau hier"), in Etappe 3 fuellt TomTom
- * dieselbe Liste automatisch. Der Rest der App bleibt dabei unveraendert.
+ * Der Kern steckt in `sperren`: BRouter kennt `nogos`, mit dem sich Bereiche
+ * verteuern lassen. Das Gewicht wird aus dem gemeldeten Zeitverlust gerechnet
+ * (siehe `gewichtAus`), damit ein dicker Stau die Route stärker verbiegt als
+ * ein kleiner. Die Routing-Maschine muss dadurch nie etwas von Verkehr wissen.
  */
 (function () {
   'use strict';
 
-  /* ------------------------------------------------------------ Einstellungen */
-  var BROUTER  = 'https://brouter.de/brouter';
-  var PROFIL   = 'car-fast';
-  // Sperrgewicht = Zusatzkosten fuers Durchfahren, ungefaehr in Metern
-  // Wegstrecke gerechnet. Gemessen an einer Testroute: 50 aendert nichts,
-  // ab etwa 500 weicht BRouter aus. 4000 entspricht grob "nimm den Umweg,
-  // solange er nicht mehr als ~4 km kostet".
-  var SPERRGEWICHT = 4000;
-  var SPERRRADIUS  = 400;      // Meter
+  /* ------------------------------------------------------------ Grundwerte */
+  var BROUTER = 'https://brouter.de/brouter';
+  var PROFIL_DATEI = 'profil/umfahrung.brf';
+  var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
 
-  // CARTOs Nachtkarte ist von Haus aus so dunkel, dass die Strassen im Auto
-  // kaum noch zu erkennen sind. Ein Aufhellungsfilter auf der Kachelebene
-  // kostet nichts und macht sie brauchbar.
+  // Umrechnung Zeitverlust -> Sperrgewicht. BRouter rechnet Gewichte grob in
+  // Metern Wegstrecke. 800 m je verlorener Minute heisst sinngemäß: "ein
+  // Umweg lohnt, solange er kürzer ist als das, was der Stau kostet."
+  var METER_JE_MINUTE = 800;
+
   var KARTEN = {
     tag:   { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
              hg: '#eae6e0', filter: 'none' },
+    // CARTOs Nachtkarte ist von Haus aus so dunkel, dass die Strassen im Auto
+    // kaum zu erkennen sind. Der Aufhellungsfilter kostet nichts.
     nacht: { url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
              hg: '#101418', filter: 'brightness(1.9) contrast(.95) saturate(1.2)' }
   };
-  var QUELLE = '&copy; OpenStreetMap, &copy; CARTO · Routing: BRouter';
+  var QUELLE = '&copy; OpenStreetMap, &copy; CARTO · BRouter · Autobahn GmbH';
 
   /* ------------------------------------------------------------------ Zustand */
-  var karte, kachelLage, ichMarke, ichKreis;
-  var linie = null, nebenlinien = [], zielMarke = null;
+  var karte, kachelLage;
+  var ichMarke, ichKreis, zielMarke = null, stoppMarken = [], blitzMarken = [];
+  var linie = null, nebenlinien = [];
   var standort = null, kurs = null, ziel = null, zielName = '';
+  var stopps = [];                       // [{ort:[lat,lon], name:''}]
   var varianten = [], variante = 0;
   var hinweise = [], gesagt = {}, letzterText = '';
-  var routePunkte = [];
-  var folgen = true, sprache = false, nacht = true, sperrmodus = false;
-  var abseitsZaehler = 0, letzteNeu = 0;
+  var routePunkte = [], routeRefs = [], blitzer = [];
+  var sperren = [];                      // {ort,radius,gewicht,hart,text,quelle,kreis}
+  var folgen = true, sprache = false, nacht = false;
+  var blitzWarnen = true, verkehrAn = true, stoppmodus = false, staumodus = false;
+  var schwelle = 5;                      // Minuten Zeitverlust
+  var tomtomKey = '';
+  var profilId = null;
+  var abseitsZaehler = 0, letzteNeu = 0, laeuft = 0;
   var vorschlagTimer = null, letzteSuche = 0;
-  var sperren = [];            // {lat, lon, radius, gewicht, quelle, kreis}
-  var laeuft = 0;              // Zaehler, um veraltete Antworten zu verwerfen
+  var verkehrTimer = null, letzterVerkehr = 0, verkehrLaeuft = false;
 
   function $(id) { return document.getElementById(id); }
   function info(t) { $('status').textContent = t; }
+  function merken(k, v) { try { localStorage.setItem('un-' + k, v); } catch (e) {} }
+  function geholt(k, ers) {
+    try { var v = localStorage.getItem('un-' + k); return v === null ? ers : v; }
+    catch (e) { return ers; }
+  }
 
   /* --------------------------------------------------------------- Geometrie */
-  function abstand(a, b) {
-    var R = 6371000, t = Math.PI / 180;
-    var dLat = (b[0] - a[0]) * t, dLon = (b[1] - a[1]) * t;
-    var x = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-            Math.cos(a[0] * t) * Math.cos(b[0] * t) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    return 2 * R * Math.asin(Math.sqrt(x));
-  }
+  var abstand = window.Verkehr.abstand;
   function punktZuStrecke(p, a, b) {
-    // Grob in Metern; fuer "bin ich noch auf der Route" genau genug.
+    // Grob in Metern; für "bin ich noch auf der Route" genau genug.
     var kx = 111320 * Math.cos(p[0] * Math.PI / 180), ky = 110540;
     var px = (p[1] - a[1]) * kx, py = (p[0] - a[0]) * ky;
     var bx = (b[1] - a[1]) * kx, by = (b[0] - a[0]) * ky;
@@ -81,41 +87,51 @@
     }
     return min;
   }
+  // Index des nächstgelegenen Routenpunkts - damit lässt sich unterscheiden,
+  // was noch vor einem liegt und was schon hinter einem.
+  function routenIndex(ll) {
+    var best = Infinity, k = 0;
+    for (var i = 0; i < routePunkte.length; i++) {
+      var d = abstand(ll, routePunkte[i]);
+      if (d < best) { best = d; k = i; }
+    }
+    return k;
+  }
+  function uhrzeit(minutenSpaeter) {
+    var d = new Date(Date.now() + minutenSpaeter * 60000);
+    return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+  }
 
   /* ------------------------------------------------------------------- Karte */
   function kartenAufbau() {
     karte = L.map('karte', {
-      zoomControl: false, attributionControl: true,
-      tap: false, doubleClickZoom: false
-    }).setView([48.5216, 9.0576], 13);      // Tuebingen, bis der Standort da ist
+      zoomControl: false, attributionControl: true, tap: false, doubleClickZoom: false
+    }).setView([48.5216, 9.0576], 13);
     kachelSetzen();
 
-    // Langer Druck setzt das Ziel. Auf dem Handy gibt es kein Rechtsklick,
-    // und ein kurzer Tipp waere zu leicht aus Versehen ausgeloest.
-    var druckTimer = null, druckStart = null;
+    // Langer Druck setzt das Ziel. Auf dem Handy gibt es kein Rechtsklick, und
+    // ein kurzer Tipp wäre zu leicht aus Versehen ausgelöst.
+    var druckTimer = null;
     karte.on('mousedown touchstart', function (e) {
       var ll = e.latlng;
-      druckStart = ll;
       druckTimer = setTimeout(function () {
         druckTimer = null;
-        if (!ll) return;
-        zielSetzen(ll.lat, ll.lng, 'Kartenpunkt');
+        if (ll) zielSetzen(ll.lat, ll.lng, 'Kartenpunkt');
       }, 550);
     });
-    karte.on('mouseup touchend mousemove touchmove zoomstart', function () {
-      if (druckTimer) { clearTimeout(druckTimer); druckTimer = null; }
+    ['mouseup', 'touchend', 'mousemove', 'touchmove', 'zoomstart'].forEach(function (t) {
+      karte.on(t, function () { if (druckTimer) { clearTimeout(druckTimer); druckTimer = null; } });
     });
 
-    // Kurzer Tipp im Sperrmodus setzt eine Stauzone.
     karte.on('click', function (e) {
-      if (!sperrmodus) return;
-      sperrmodus = false;
-      $('k-sperre').classList.remove('warn');
-      sperreHinzufuegen(e.latlng.lat, e.latlng.lng, 'hand');
+      if (stoppmodus) { stoppmodus = false; knopfStand(); stoppHinzufuegen(e.latlng.lat, e.latlng.lng); }
+      else if (staumodus) { staumodus = false; knopfStand(); sperreHinzufuegen({
+        ort: [e.latlng.lat, e.latlng.lng], radius: 500, minuten: 10,
+        text: 'Stau von Hand', quelle: 'hand'
+      }); }
     });
 
-    // Sobald der Nutzer die Karte selbst bewegt, hoert das Folgen auf -
-    // sonst zerrt die App bei jedem Blick auf die Umgebung zurueck.
+    // Sobald der Nutzer die Karte selbst bewegt, hört das Folgen auf.
     karte.on('dragstart', function () { if (folgen) folgenSetzen(false); });
   }
 
@@ -130,19 +146,24 @@
     $('karte').style.background = k.hg;
   }
 
-  /* --------------------------------------------------------------- Standort */
+  /* ---------------------------------------------------------------- Standort */
   function standortStarten() {
     if (!navigator.geolocation) { info('Kein Standort verfügbar'); return; }
     navigator.geolocation.watchPosition(function (p) {
       var ll = [p.coords.latitude, p.coords.longitude];
       var erste = !standort;
       standort = ll;
-      kurs = (typeof p.coords.heading === 'number' && !isNaN(p.coords.heading) &&
-              p.coords.speed > 1) ? p.coords.heading : kurs;
+      if (typeof p.coords.heading === 'number' && !isNaN(p.coords.heading) && p.coords.speed > 1) {
+        kurs = p.coords.heading;
+      }
       ichZeichnen(ll, p.coords.accuracy);
       if (folgen) karte.setView(ll, Math.max(karte.getZoom(), 16), { animate: !erste });
-      if (erste) { info('Standort gefunden'); if (ziel) route(); }
-      if (ziel && routePunkte.length) { bannerAktualisieren(ll); abweichungPruefen(ll); }
+      if (erste && ziel) route();
+      if (ziel && routePunkte.length) {
+        bannerAktualisieren(ll);
+        blitzPruefen(ll);
+        abweichungPruefen(ll);
+      }
     }, function (e) {
       info(e.code === 1 ? 'Standort abgelehnt – in den Einstellungen erlauben'
                         : 'Standort nicht verfügbar');
@@ -174,20 +195,67 @@
     }
   }
 
-  /* --------------------------------------------------------------- Sperrzonen */
-  function sperreHinzufuegen(lat, lon, quelle) {
-    var s = { lat: lat, lon: lon, radius: SPERRRADIUS, gewicht: SPERRGEWICHT, quelle: quelle };
-    s.kreis = L.circle([lat, lon], {
-      radius: s.radius, color: '#c82d2d', weight: 2, opacity: .85,
-      fillColor: '#c82d2d', fillOpacity: .22
-    }).addTo(karte);
-    s.kreis.on('click', function (e) {
-      L.DomEvent.stop(e);
-      sperreEntfernen(s);
+  /* ------------------------------------------------------------ Zwischenziele */
+  function stoppHinzufuegen(lat, lon, name) {
+    stopps.push({ ort: [lat, lon], name: name || ('Stopp ' + (stopps.length + 1)) });
+    stoppMarkenZeichnen();
+    stoppListeZeichnen();
+    if (ziel) route(); else info('Zwischenziel gesetzt – jetzt noch das Ziel eingeben');
+  }
+  function stoppEntfernen(i) {
+    stopps.splice(i, 1);
+    stoppMarkenZeichnen(); stoppListeZeichnen();
+    if (ziel) route();
+  }
+  function stoppMarkenZeichnen() {
+    stoppMarken.forEach(function (m) { karte.removeLayer(m); });
+    stoppMarken = stopps.map(function (s, i) {
+      return L.marker(s.ort, {
+        icon: L.divIcon({ className: '', iconSize: [26, 26], iconAnchor: [13, 13],
+                          html: '<div class="stopp-punkt">' + (i + 1) + '</div>' })
+      }).addTo(karte).on('click', function (e) { L.DomEvent.stop(e); stoppEntfernen(i); });
     });
-    sperren.push(s);
-    sperrfahneAktualisieren();
-    if (ziel) route(); else info('Stauzone gesetzt – tippe sie an, um sie zu löschen');
+  }
+  function stoppListeZeichnen() {
+    var l = $('stoppliste');
+    if (!stopps.length) { l.hidden = true; return; }
+    l.hidden = false;
+    l.innerHTML = '';
+    stopps.forEach(function (s, i) {
+      var b = document.createElement('button');
+      b.innerHTML = '<b>' + (i + 1) + '</b> ' + s.name + ' <span>✕</span>';
+      b.onclick = function () { stoppEntfernen(i); };
+      l.appendChild(b);
+    });
+  }
+
+  /* ---------------------------------------------------------------- Sperrzonen */
+  // Aus dem gemeldeten Zeitverlust wird das Sperrgewicht. So verbiegt ein
+  // 20-Minuten-Stau die Route deutlich stärker als ein 6-Minuten-Stau, statt
+  // dass beide gleich behandelt werden.
+  function gewichtAus(minuten, hart) {
+    if (hart) return 0;                            // 0 = harte Sperre
+    return Math.round(Math.max(minuten, 1) * METER_JE_MINUTE);
+  }
+
+  function sperreHinzufuegen(s) {
+    var eintrag = {
+      ort: s.ort,
+      radius: s.radius || 700,
+      gewicht: gewichtAus(s.minuten || 0, s.hart),
+      hart: !!s.hart,
+      minuten: s.minuten || 0,
+      text: s.text || 'Stau',
+      quelle: s.quelle || 'hand'
+    };
+    eintrag.kreis = L.circle(s.ort, {
+      radius: eintrag.radius, color: '#c82d2d', weight: 2, opacity: .85,
+      fillColor: '#c82d2d', fillOpacity: eintrag.hart ? .3 : .18
+    }).bindTooltip(eintrag.text).addTo(karte);
+    eintrag.kreis.on('click', function (e) { L.DomEvent.stop(e); sperreEntfernen(eintrag); });
+    sperren.push(eintrag);
+    stoerfahne();
+    return eintrag;
   }
 
   function sperreEntfernen(s) {
@@ -195,17 +263,28 @@
     if (i < 0) return;
     karte.removeLayer(s.kreis);
     sperren.splice(i, 1);
-    sperrfahneAktualisieren();
+    stoerfahne();
     if (ziel) route();
   }
 
-  function sperrfahneAktualisieren() {
-    var f = $('sperrfahne');
+  function sperrenLeeren(nurQuelle) {
+    sperren.slice().forEach(function (s) {
+      if (!nurQuelle || s.quelle === nurQuelle) {
+        karte.removeLayer(s.kreis);
+        sperren.splice(sperren.indexOf(s), 1);
+      }
+    });
+    stoerfahne();
+  }
+
+  function stoerfahne() {
+    var f = $('stoerfahne');
     if (!sperren.length) { f.hidden = true; return; }
+    var min = sperren.reduce(function (a, s) { return a + (s.minuten || 0); }, 0);
     f.hidden = false;
-    f.textContent = sperren.length === 1
-      ? 'Umfahrung aktiv · 1 Stauzone'
-      : 'Umfahrung aktiv · ' + sperren.length + ' Stauzonen';
+    f.textContent = 'Umfahrung aktiv · ' + sperren.length +
+                    (sperren.length === 1 ? ' Störung' : ' Störungen') +
+                    (min ? ' · ' + Math.round(min) + ' min gespart' : '');
   }
 
   // BRouter erwartet lon,lat,radius[,gewicht], mehrere durch | getrennt.
@@ -213,12 +292,133 @@
   function nogoParameter() {
     if (!sperren.length) return '';
     return '&nogos=' + sperren.map(function (s) {
-      return s.lon.toFixed(6) + ',' + s.lat.toFixed(6) + ',' + s.radius +
+      return s.ort[1].toFixed(6) + ',' + s.ort[0].toFixed(6) + ',' + s.radius +
              (s.gewicht ? ',' + s.gewicht : '');
     }).join('|');
   }
 
-  /* ---------------------------------------------------------------- Routing */
+  /* ------------------------------------------------------------------ Verkehr */
+  function verkehrPruefen(stillschweigend) {
+    if (!verkehrAn || !routePunkte.length || verkehrLaeuft) return;
+    verkehrLaeuft = true;
+    letzterVerkehr = Date.now();
+    if (!stillschweigend) info('Prüfe Verkehrslage …');
+
+    // Nur den Teil vor uns betrachten - hinter uns liegende Staus sind egal.
+    var vorne = routePunkte.slice(standort ? routenIndex(standort) : 0);
+    if (vorne.length < 2) { verkehrLaeuft = false; return; }
+
+    window.Verkehr.alleStoerungen(vorne, routeRefs, tomtomKey, schwelle)
+      .then(function (stoerungen) {
+        verkehrLaeuft = false;
+        var vorher = sperren.filter(function (s) { return s.quelle !== 'hand'; }).length;
+        sperrenLeeren('autobahn'); sperrenLeeren('tomtom');
+        stoerungen.forEach(sperreHinzufuegen);
+
+        if (!stoerungen.length) {
+          if (!stillschweigend) {
+            info(tomtomKey ? 'Freie Fahrt – keine Störung ab ' + schwelle + ' min'
+                           : 'Keine Autobahn-Störung. Für Staus auf Land- und '
+                             + 'Stadtstraßen fehlt der TomTom-Schlüssel.');
+          }
+          if (vorher) route();                    // Stau hat sich aufgelöst
+          return;
+        }
+        var min = Math.round(stoerungen.reduce(function (a, s) { return a + s.minuten; }, 0));
+        if (sprache) { letzterText = ''; sagen(
+          stoerungen.length === 1
+            ? 'Stau voraus, ' + min + ' Minuten. Ich suche eine Umfahrung.'
+            : stoerungen.length + ' Störungen voraus, zusammen ' + min +
+              ' Minuten. Ich suche eine Umfahrung.'); }
+        route();
+      })
+      .catch(function () { verkehrLaeuft = false; });
+  }
+
+  function verkehrTaktStarten() {
+    clearInterval(verkehrTimer);
+    // Alle drei Minuten. Häufiger lohnt nicht - Staumeldungen ändern sich
+    // nicht schneller, und das TomTom-Freikontingent ist begrenzt.
+    verkehrTimer = setInterval(function () {
+      if (!ziel || !routePunkte.length || !standort) return;
+      var v = varianten[variante];
+      if (!routeRefs.length && v && v.messages) {
+        // Kennungen nachholen, falls die Auskunft beim ersten Mal klemmte
+        window.Verkehr.refsErmitteln(v.messages, routePunkte).then(function (refs) {
+          routeRefs = refs;
+          verkehrPruefen(true);
+        });
+      } else verkehrPruefen(true);
+    }, 180000);
+  }
+
+  /* ------------------------------------------------------------------ Blitzer */
+  function blitzerZeichnen() {
+    blitzMarken.forEach(function (m) { karte.removeLayer(m); });
+    blitzMarken = [];
+    if (!blitzWarnen) return;
+    blitzer.forEach(function (b) {
+      blitzMarken.push(L.marker(b.ort, {
+        icon: L.divIcon({ className: '', iconSize: [22, 22], iconAnchor: [11, 11],
+                          html: '<div class="blitz-punkt">' + (b.tempo || '!') + '</div>' }),
+        interactive: false
+      }).addTo(karte));
+    });
+  }
+
+  // Warnt nur vor Blitzern, auf die man wirklich zufährt. OSM hält bei vielen
+  // Standorten die Messrichtung fest; wo sie fehlt, wird über den Kurs
+  // entschieden, um Gegenrichtungs-Fehlalarme zu vermeiden.
+  function blitzPruefen(ll) {
+    if (!blitzWarnen || !blitzer.length) { $('blitzfahne').hidden = true; return; }
+    var naechster = null, nd = Infinity;
+    blitzer.forEach(function (b) {
+      var d = abstand(ll, b.ort);
+      if (d > 500 || d >= nd) return;
+      if (kurs !== null) {
+        // Liegt der Blitzer ungefähr voraus?
+        if (window.Verkehr.winkelDiff(window.Verkehr.peilung(ll, b.ort), kurs) > 65) return;
+        if (b.richtung.length &&
+            !b.richtung.some(function (r) { return window.Verkehr.winkelDiff(r, kurs) < 60; })) return;
+      }
+      naechster = b; nd = d;
+    });
+    var f = $('blitzfahne');
+    if (!naechster) { f.hidden = true; return; }
+    f.hidden = false;
+    f.textContent = '📷 Blitzer in ' + Math.round(nd / 10) * 10 + ' m' +
+                    (naechster.tempo ? ' · Tempo ' + naechster.tempo : '');
+    var schluessel = 'blitz' + naechster.ort[0].toFixed(5);
+    if (nd < 350 && !gesagt[schluessel]) {
+      gesagt[schluessel] = true;
+      sagen(naechster.tempo ? 'Achtung, Blitzer. Tempo ' + naechster.tempo
+                            : 'Achtung, Blitzer voraus');
+    }
+  }
+
+  /* ------------------------------------------------------------------ Profil */
+  // Das eigene Profil wird beim ersten Start zu BRouter hochgeladen und die
+  // Kennung gemerkt. BRouter räumt hochgeladene Profile irgendwann weg -
+  // deshalb bei einem Fehlschlag einmal neu hochladen.
+  function profilBesorgen(erzwingen) {
+    var gemerkt = geholt('profilid', '');
+    if (gemerkt && !erzwingen) { profilId = gemerkt; return Promise.resolve(profilId); }
+    return fetch(PROFIL_DATEI)
+      .then(function (r) { return r.text(); })
+      .then(function (txt) {
+        return fetch(BROUTER + '/profile', { method: 'POST', body: txt });
+      })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.profileid) throw new Error('kein Profil');
+        profilId = d.profileid;
+        merken('profilid', profilId);
+        return profilId;
+      })
+      .catch(function () { profilId = ERSATZPROFIL; return profilId; });
+  }
+
+  /* ----------------------------------------------------------------- Routing */
   function zielSetzen(lat, lon, name) {
     ziel = [lat, lon];
     zielName = name || '';
@@ -230,13 +430,17 @@
   }
 
   function zielLoeschen() {
-    ziel = null; zielName = ''; varianten = []; hinweise = []; routePunkte = [];
+    ziel = null; zielName = ''; varianten = []; hinweise = [];
+    routePunkte = []; routeRefs = []; blitzer = [];
     if (zielMarke) { karte.removeLayer(zielMarke); zielMarke = null; }
     if (linie) { karte.removeLayer(linie); linie = null; }
     nebenlinien.forEach(function (l) { karte.removeLayer(l); });
     nebenlinien = [];
+    blitzerZeichnen();
+    sperrenLeeren('autobahn'); sperrenLeeren('tomtom');
     $('varianten').hidden = true;
     $('banner').hidden = true;
+    $('blitzfahne').hidden = true;
     $('suche').value = '';
     $('suche-loeschen').hidden = true;
     info('Ziel gelöscht');
@@ -247,56 +451,95 @@
     if (!standort) { info('Warte auf Standort …'); return; }
     var lauf = ++laeuft;
     info('Berechne Route …');
-    var ll = standort[1] + ',' + standort[0] + '|' + ziel[1] + ',' + ziel[0];
+
+    var punkte = [standort].concat(stopps.map(function (s) { return s.ort; }), [ziel]);
+    var ll = punkte.map(function (p) { return p[1] + ',' + p[0]; }).join('|');
     var nogos = nogoParameter();
 
-    // Drei Varianten parallel. Bei gesetzten Sperren weichen sie oft deutlich
-    // voneinander ab - genau dann will man die Wahl haben.
-    var anfragen = [0, 1, 2].map(function (idx) {
-      return fetch(BROUTER + '?lonlats=' + ll + '&profile=' + PROFIL +
-                   '&alternativeidx=' + idx + '&format=geojson&timode=2' + nogos)
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .catch(function () { return null; });
-    });
+    profilBesorgen(false).then(function (prof) {
+      // Vier Kandidaten, damit am Ende wirklich drei *verschiedene* übrig
+      // bleiben. BRouters Alternativen ähneln sich oft; die vierte Anfrage
+      // meidet Autobahnen und bringt damit fast immer eine echte Alternative.
+      var kandidaten = [
+        '&alternativeidx=0', '&alternativeidx=1', '&alternativeidx=2',
+        '&alternativeidx=0&profile:avoid_motorways=1'
+      ];
+      var anfragen = kandidaten.map(function (zusatz) {
+        return fetch(BROUTER + '?lonlats=' + ll + '&profile=' + prof +
+                     '&format=geojson&timode=2' + zusatz + nogos)
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .catch(function () { return null; });
+      });
 
-    Promise.all(anfragen).then(function (ergebnisse) {
-      if (lauf !== laeuft) return;             // eine neuere Anfrage laeuft schon
-      varianten = [];
-      ergebnisse.forEach(function (g, idx) {
-        var f = g && g.features && g.features[0];
-        if (!f) return;
-        var pr = f.properties || {};
-        varianten.push({
-          idx: idx,
-          koord: f.geometry.coordinates.map(function (c) { return [c[1], c[0]]; }),
-          hinweise: pr.voicehints || [],
-          km:  parseInt(pr['track-length'] || 0, 10) / 1000,
-          min: Math.round(parseInt(pr['total-time'] || 0, 10) / 60),
-          art: streckenArt(pr.messages)
+      Promise.all(anfragen).then(function (ergebnisse) {
+        if (lauf !== laeuft) return;               // eine neuere Anfrage läuft
+        if (!ergebnisse.some(Boolean) && prof !== ERSATZPROFIL) {
+          // Profil bei BRouter weggeräumt? Einmal neu hochladen, dann nochmal.
+          return profilBesorgen(true).then(function () { route(); });
+        }
+
+        var roh = [];
+        ergebnisse.forEach(function (g) {
+          var f = g && g.features && g.features[0];
+          if (!f) return;
+          var pr = f.properties || {};
+          roh.push({
+            koord: f.geometry.coordinates.map(function (c) { return [c[1], c[0]]; }),
+            hinweise: pr.voicehints || [],
+            km: parseInt(pr['track-length'] || 0, 10) / 1000,
+            min: Math.round(parseInt(pr['total-time'] || 0, 10) / 60),
+            messages: pr.messages || null,
+            art: streckenArt(pr.messages)
+          });
         });
+        if (!roh.length) {
+          info(sperren.length ? 'Keine Route – Sperrzone zu gross?' : 'Keine Route gefunden');
+          return;
+        }
+
+        varianten = verschiedene(roh).slice(0, 3);
+        variante = 0;
+        variantenWaehlen(0);
+        umgebungNachladen(varianten[0]);
       });
-      if (!varianten.length) {
-        info(sperren.length ? 'Keine Route – Stauzone zu gross?' : 'Keine Route gefunden');
-        return;
-      }
-      // BRouter gibt manchmal dreimal denselben Weg zurueck
-      var gesehen = {};
-      varianten = varianten.filter(function (v) {
-        var k = v.km.toFixed(2) + '/' + v.min;
-        if (gesehen[k]) return false;
-        gesehen[k] = true; return true;
-      });
-      variante = 0;
-      variantenWaehlen(0);
     });
   }
 
-  /* Wertet BRouters `messages` aus: dort steht fuer jeden Abschnitt Laenge und
-   * die OSM-Merkmale. Damit laesst sich vor der Abfahrt sagen, wie viel der
-   * Strecke durch Wohngebiete fuehrt und wie viel durch "Anlieger frei" -
-   * die Angaben, ohne die man eine aggressive Umfahrung nicht beurteilen kann. */
+  /* Aussortieren, was praktisch dieselbe Strecke ist. Ein Vergleich über
+   * km und Minuten reicht dafür nicht - zwei Wege können gleich lang sein und
+   * trotzdem völlig anders verlaufen. Deshalb über die tatsächliche
+   * Überdeckung: wer sich zu über 80 % mit einer schon vorhandenen Variante
+   * deckt, fliegt raus. */
+  function verschiedene(liste) {
+    liste.sort(function (a, b) { return a.min - b.min; });
+    var raus = [];
+    liste.forEach(function (v) {
+      v.raster = rasterMenge(v.koord);
+      var doppelt = raus.some(function (r) { return ueberdeckung(v.raster, r.raster) > 0.8; });
+      if (!doppelt) raus.push(v);
+    });
+    return raus;
+  }
+  // Route auf ein grobes Gitter (~150 m) abbilden - macht den Vergleich
+  // unempfindlich gegen kleine Abweichungen der Stützpunkte.
+  function rasterMenge(koord) {
+    var m = {};
+    koord.forEach(function (p) {
+      m[Math.round(p[0] * 740) + '/' + Math.round(p[1] * 1100)] = true;
+    });
+    return m;
+  }
+  function ueberdeckung(a, b) {
+    var ka = Object.keys(a), treffer = 0;
+    ka.forEach(function (k) { if (b[k]) treffer++; });
+    return treffer / Math.max(ka.length, 1);
+  }
+
+  /* Wertet BRouters `messages` aus: dort steht je Abschnitt Länge und die
+   * OSM-Merkmale. Daraus der Wohnstrassen- und Anlieger-Anteil - die Angaben,
+   * ohne die man eine aggressive Umfahrung nicht beurteilen kann. */
   function streckenArt(messages) {
-    var art = { wohn: 0, anlieger: 0, tempo30: 0, gesamt: 0 };
+    var art = { wohn: 0, anlieger: 0, gesamt: 0, tempo: 0 };
     if (!messages || messages.length < 2) return art;
     var kopf = messages[0];
     var iD = kopf.indexOf('Distance'), iT = kopf.indexOf('WayTags');
@@ -310,11 +553,10 @@
         if (j > 0) tags[p.slice(0, j)] = p.slice(j + 1);
       });
       var hw = tags.highway || '';
-      if (hw === 'residential' || hw === 'living_street' || hw === 'service') art.wohn += d;
-      if (tags.access === 'destination' || tags['motor_vehicle'] === 'destination' ||
+      if (hw === 'residential' || hw === 'living_street' ||
+          hw === 'service' || hw === 'unclassified') art.wohn += d;
+      if (tags.access === 'destination' || tags.motor_vehicle === 'destination' ||
           tags.motorcar === 'destination' || tags.vehicle === 'destination') art.anlieger += d;
-      var ms = parseInt(tags.maxspeed, 10);
-      if (ms && ms <= 30) art.tempo30 += d;
     }
     return art;
   }
@@ -325,15 +567,15 @@
     leiste.hidden = false;
     leiste.innerHTML = '';
     var schnellste = varianten.reduce(function (a, c) { return c.min < a.min ? c : a; });
+    var kuerzeste = varianten.reduce(function (a, c) { return c.km < a.km ? c : a; });
     varianten.forEach(function (v, i) {
       var b = document.createElement('button');
-      var etikett = v === schnellste ? '<b>schnell</b><br>' : '';
-      // Anlieger-frei-Anteil offen ausweisen: das ist die Angabe, bei der man
-      // selbst entscheiden will, ob man sie in Kauf nimmt.
-      var warn = v.art.anlieger > 100
-        ? '<br><span class="warn">' + (v.art.anlieger / 1000).toFixed(1) + ' km Anlieger</span>'
-        : (v.art.wohn > 300 ? '<br>' + (v.art.wohn / 1000).toFixed(1) + ' km Wohnstr.' : '');
-      b.innerHTML = etikett + v.min + ' min<br>' + v.km.toFixed(1) + ' km' + warn;
+      var etikett = v === schnellste ? 'schnell' : (v === kuerzeste ? 'kurz' : '');
+      var zusatz = v.art.wohn > 400
+        ? '<br><span class="klein">' + (v.art.wohn / 1000).toFixed(1) + ' km klein</span>' : '';
+      b.innerHTML = (etikett ? '<b>' + etikett + '</b><br>' : '') +
+                    v.min + ' min<br>' + uhrzeit(v.min) + '<br>' +
+                    v.km.toFixed(1) + ' km' + zusatz;
       if (i === variante) b.className = 'gewaehlt';
       b.onclick = function () { variantenWaehlen(i); };
       leiste.appendChild(b);
@@ -354,7 +596,7 @@
         color: '#8a929c', weight: 4, opacity: .5, dashArray: '6 7', interactive: false
       }).addTo(karte));
     });
-    // Weisser Rand darunter, damit die Route auf hellem wie dunklem Grund traegt
+    // Rand darunter, damit die Route auf hellem wie dunklem Grund trägt
     nebenlinien.push(L.polyline(v.koord, {
       color: nacht ? '#000' : '#fff', weight: 10, opacity: .55, interactive: false
     }).addTo(karte));
@@ -364,33 +606,76 @@
     routePunkte = v.koord;
     abseitsZaehler = 0;
     gesagt = {};
-    // BRouter meldet auch Punkte, an denen man einfach weiterfaehrt (etwa weil
-    // die Strasse ihren Namen wechselt). "In 400 Metern geradeaus" hilft
-    // niemandem und verdeckt den naechsten echten Hinweis - deshalb raus.
-    hinweise = v.hinweise.map(function (h) {
-      var k = Math.min(h[0], v.koord.length - 1);
-      return { ort: v.koord[k], winkel: h[4], text: winkelText(h[4]) };
-    }).filter(function (h) { return h.text !== 'geradeaus'; });
+    hinweise = hinweiseBauen(v);
 
     variantenZeigen();
     var zusatz = '';
-    if (v.art.wohn > 300) zusatz += ' · ' + (v.art.wohn / 1000).toFixed(1) + ' km Wohnstraßen';
-    if (v.art.anlieger > 100) zusatz += ' · ' + (v.art.anlieger / 1000).toFixed(1) + ' km Anlieger frei';
-    info('→ ' + (zielName || 'Ziel').split(',')[0] + ' · ' + v.min + ' min · ' +
-         v.km.toFixed(1) + ' km' + zusatz);
+    if (v.art.wohn > 400) zusatz += ' · ' + (v.art.wohn / 1000).toFixed(1) + ' km kleine Straßen';
+    if (v.art.anlieger > 100) zusatz += ' · ' + (v.art.anlieger / 1000).toFixed(1) + ' km Anlieger';
+    info('→ ' + (zielName || 'Ziel').split(',')[0] + ' · an ' + uhrzeit(v.min) +
+         ' · ' + v.min + ' min · ' + v.km.toFixed(1) + ' km' + zusatz);
     if (standort) bannerAktualisieren(standort);
   }
 
-  /* ------------------------------------------------------------- Abbiegen */
-  // Bewusst ueber den Winkel statt ueber BRouters Befehlsnummern: die Nummern
-  // sind nirgends verbindlich dokumentiert, der Winkel ist eindeutig
-  // (negativ = links, positiv = rechts).
+  // Nach einer neuen Route die Umgebung nachladen: feste Blitzer im Korridor
+  // und die Kennungen befahrener Autobahnen. Beide Quellen merken sich ihr
+  // Ergebnis und schweigen, wenn dieselbe Strecke nochmal berechnet wird -
+  // sonst wuerde jede Neuberechnung waehrend der Fahrt neue Abfragen ausloesen
+  // und Overpass sperrt einen aus.
+  function umgebungNachladen(v) {
+    window.Verkehr.blitzerLaden(routePunkte, 25).then(function (b) {
+      blitzer = b;
+      blitzerZeichnen();
+      if (b.length) info($('status').textContent + ' · ' + b.length + ' Blitzer');
+    });
+    // Kurz warten: direkt davor lief die Adresssuche ueber denselben Dienst,
+    // und Nominatim drosselt bei zwei Anfragen in derselben Sekunde.
+    setTimeout(function () {
+      window.Verkehr.refsErmitteln(v.messages, routePunkte).then(function (refs) {
+        routeRefs = refs;
+        if (verkehrAn) verkehrPruefen(true);
+      });
+    }, 1500);
+  }
+
+  /* --------------------------------------------------------------- Abbiegen */
+  // Über den Winkel statt über BRouters Befehlsnummern, wo es geht: die
+  // Nummern sind nirgends verbindlich dokumentiert, der Winkel ist eindeutig
+  // (negativ = links, positiv = rechts). Nur beim Kreisverkehr hilft die
+  // Nummer weiter, weil dort die Ausfahrt mitgeliefert wird.
+  var KREISVERKEHR = { 13: 'rechts', 14: 'links' };
+  var ZAHLWORT = ['', 'erste', 'zweite', 'dritte', 'vierte', 'fünfte', 'sechste'];
+
   function winkelText(w) {
     var a = Math.abs(w), seite = w < 0 ? 'links' : 'rechts';
     if (a < 25)  return 'geradeaus';
     if (a < 60)  return 'leicht ' + seite;
     if (a < 120) return seite + ' abbiegen';
     return 'scharf ' + seite;
+  }
+
+  function hinweiseBauen(v) {
+    var liste = v.hinweise.map(function (h) {
+      var k = Math.min(h[0], v.koord.length - 1);
+      var kreis = KREISVERKEHR[h[1]];
+      var text = kreis && h[2]
+        ? 'im Kreisverkehr die ' + (ZAHLWORT[h[2]] || h[2] + '.') + ' Ausfahrt'
+        : winkelText(h[4]);
+      return { ort: v.koord[k], winkel: kreis ? 0 : h[4], text: text, kreis: !!kreis };
+    }).filter(function (h) {
+      // BRouter meldet auch Punkte, an denen man einfach weiterfährt.
+      // "In 400 Metern geradeaus" hilft niemandem und verdeckt den nächsten
+      // echten Hinweis.
+      return h.text !== 'geradeaus';
+    });
+
+    // Zwei Abbiegungen dicht hintereinander zusammenfassen - im Auto braucht
+    // man beide auf einmal, sonst kommt die zweite zu spät.
+    liste.forEach(function (h, i) {
+      var n = liste[i + 1];
+      if (n && abstand(h.ort, n.ort) < 180) h.danach = n.text;
+    });
+    return liste;
   }
 
   function bannerAktualisieren(ll) {
@@ -411,35 +696,41 @@
       $('banner-pfeil').style.transform = 'rotate(0deg)';
       $('banner-entfernung').textContent = 'Ziel';
       $('banner-anweisung').textContent = zielName.split(',')[0] || 'erreicht';
+      $('banner-danach').hidden = true;
       if (!gesagt.ziel) { gesagt.ziel = true; sagen('Ziel erreicht'); }
       return;
     }
 
     if (beste === null || besteD > 1500) { banner.hidden = true; return; }
     var h = hinweise[beste];
-    if (besteD < 18) gesagt['weg' + beste] = true;      // passiert
+    if (besteD < 18) gesagt['weg' + beste] = true;
 
     banner.hidden = false;
     banner.classList.toggle('gleich', besteD < 120);
-    $('banner-pfeil').style.transform = 'rotate(' + Math.max(-135, Math.min(135, h.winkel)) + 'deg)';
+    $('banner-pfeil').textContent = h.kreis ? '↻' : '↑';
+    $('banner-pfeil').style.transform =
+      h.kreis ? 'none' : 'rotate(' + Math.max(-135, Math.min(135, h.winkel)) + 'deg)';
     $('banner-entfernung').textContent =
       besteD < 30 ? 'jetzt' :
       besteD < 999 ? Math.round(besteD / 10) * 10 + ' m'
                    : (besteD / 1000).toFixed(1) + ' km';
     $('banner-anweisung').textContent = h.text;
+    $('banner-danach').hidden = !h.danach;
+    if (h.danach) $('banner-danach').textContent = 'dann ' + h.danach;
 
-    // Zweimal ansagen: einmal mit Vorlauf zum Einordnen, einmal kurz davor.
+    // Zweimal ansagen: mit Vorlauf zum Einordnen, und kurz davor.
+    var anhang = h.danach ? ', dann ' + h.danach : '';
     if (besteD < 250 && !gesagt['ton' + beste]) {
       gesagt['ton' + beste] = true;
-      sagen('In ' + Math.round(besteD / 10) * 10 + ' Metern ' + h.text);
+      sagen('In ' + Math.round(besteD / 10) * 10 + ' Metern ' + h.text + anhang);
     } else if (besteD < 60 && !gesagt['jetzt' + beste]) {
       gesagt['jetzt' + beste] = true;
-      sagen('Jetzt ' + h.text);
+      sagen('Jetzt ' + h.text + anhang);
     }
   }
 
   // Neuberechnung wie bei den grossen Navis - aber erst nach drei Messungen
-  // abseits, damit ein GPS-Ausreisser nicht gleich eine neue Route ausloest.
+  // abseits, damit ein GPS-Ausreisser nicht gleich eine neue Route auslöst.
   function abweichungPruefen(ll) {
     if (!routePunkte.length) return;
     if (abstandZurRoute(ll) > 50) {
@@ -470,8 +761,8 @@
       $('suche-loeschen').hidden = !feld.value;
       var text = feld.value.trim();
       if (text.length < 3) { liste.hidden = true; return; }
-      // Nominatim erlaubt hoechstens eine Anfrage pro Sekunde - deshalb
-      // Verzoegerung und zusaetzliche Mindestpause.
+      // Nominatim erlaubt höchstens eine Anfrage pro Sekunde - deshalb
+      // Verzögerung und zusätzliche Mindestpause.
       vorschlagTimer = setTimeout(function () {
         var jetzt = Date.now();
         if (jetzt - letzteSuche < 1100) return;
@@ -490,11 +781,19 @@
             if (!t.length) { liste.hidden = true; return; }
             t.forEach(function (o) {
               var z = document.createElement('div');
-              z.textContent = o.display_name.split(',').slice(0, 3).join(',');
+              var name = o.display_name.split(',').slice(0, 3).join(',');
+              z.textContent = name;
               z.onclick = function () {
-                liste.hidden = true;
-                feld.blur();
-                zielSetzen(parseFloat(o.lat), parseFloat(o.lon), z.textContent);
+                liste.hidden = true; feld.blur();
+                // Bei gesetztem Ziel wird der Treffer zum Zwischenziel -
+                // sonst müsste man das Ziel erst löschen.
+                if (stoppmodus) {
+                  stoppmodus = false; knopfStand();
+                  stoppHinzufuegen(parseFloat(o.lat), parseFloat(o.lon), name.split(',')[0]);
+                  feld.value = zielName.split(',')[0];
+                } else {
+                  zielSetzen(parseFloat(o.lat), parseFloat(o.lon), name);
+                }
               };
               liste.appendChild(z);
             });
@@ -510,13 +809,20 @@
     $('suche-loeschen').onclick = zielLoeschen;
   }
 
-  /* -------------------------------------------------------------- Knoepfe */
+  /* ----------------------------------------------------------------- Knöpfe */
   function schalter(id, an) { $(id).classList.toggle('an', !!an); }
-
+  function knopfStand() {
+    $('k-stopp').classList.toggle('warn', stoppmodus);
+    $('s-stau').classList.toggle('warn', staumodus);
+  }
   function folgenSetzen(an) {
     folgen = an;
     schalter('k-folgen', an);
     if (an && standort) karte.setView(standort, Math.max(karte.getZoom(), 16));
+  }
+  function sheetZeigen(an) {
+    $('sheet').hidden = !an;
+    $('blende').hidden = !an;
   }
 
   function knoepfeAktivieren() {
@@ -525,41 +831,85 @@
     $('k-sprache').onclick = function () {
       sprache = !sprache;
       schalter('k-sprache', sprache);
+      merken('sprache', sprache ? '1' : '0');
       if (sprache) {
         // Die erste Ausgabe muss aus einer Nutzergeste kommen, sonst blockt iOS.
         letzterText = ''; sagen('Ansage an');
       } else window.speechSynthesis.cancel();
     };
 
-    $('k-sperre').onclick = function () {
-      if (sperren.length && !sperrmodus) {
-        // Zweiter Druck bei bestehenden Zonen raeumt auf - schneller, als
-        // waehrend der Fahrt jeden Kreis einzeln anzutippen.
-        sperren.slice().forEach(sperreEntfernen);
-        info('Stauzonen gelöscht');
-        return;
-      }
-      sperrmodus = !sperrmodus;
-      $('k-sperre').classList.toggle('warn', sperrmodus);
-      info(sperrmodus ? 'Tippe auf den Stau – die Route weicht dann aus'
-                      : 'Abgebrochen');
+    $('k-stopp').onclick = function () {
+      stoppmodus = !stoppmodus; staumodus = false; knopfStand();
+      info(stoppmodus ? 'Zwischenziel: auf die Karte tippen oder oben eintippen' : 'Abgebrochen');
+      if (stoppmodus) $('suche').value = '';
     };
 
     $('k-uebersicht').onclick = function () {
-      if (linie) {
-        folgenSetzen(false);
-        karte.fitBounds(linie.getBounds(), { padding: [40, 40] });
-      } else if (standort) {
-        karte.setView(standort, 15);
-      }
+      if (linie) { folgenSetzen(false); karte.fitBounds(linie.getBounds(), { padding: [40, 40] }); }
+      else if (standort) karte.setView(standort, 15);
     };
 
-    $('k-nacht').onclick = function () {
+    $('k-mehr').onclick = function () { sheetZeigen(true); };
+    $('s-zu').onclick = function () { sheetZeigen(false); };
+    $('blende').onclick = function () { sheetZeigen(false); };
+
+    $('s-nacht').onclick = function () {
       nacht = !nacht;
-      schalter('k-nacht', nacht);
+      $('s-nacht').textContent = nacht ? 'an' : 'aus';
+      schalter('s-nacht', nacht);
+      merken('nacht', nacht ? '1' : '0');
       kachelSetzen();
-      if (varianten.length) variantenWaehlen(variante);   // Randfarbe nachziehen
-      try { localStorage.setItem('un-nacht', nacht ? '1' : '0'); } catch (e) {}
+      if (varianten.length) variantenWaehlen(variante);
+    };
+
+    $('s-blitzer').onclick = function () {
+      blitzWarnen = !blitzWarnen;
+      $('s-blitzer').textContent = blitzWarnen ? 'an' : 'aus';
+      schalter('s-blitzer', blitzWarnen);
+      merken('blitzer', blitzWarnen ? '1' : '0');
+      blitzerZeichnen();
+      if (!blitzWarnen) $('blitzfahne').hidden = true;
+    };
+
+    $('s-verkehr').onclick = function () {
+      verkehrAn = !verkehrAn;
+      $('s-verkehr').textContent = verkehrAn ? 'an' : 'aus';
+      schalter('s-verkehr', verkehrAn);
+      merken('verkehr', verkehrAn ? '1' : '0');
+      if (verkehrAn) verkehrPruefen(false);
+      else { sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); if (ziel) route(); }
+    };
+
+    $('s-schwelle').onchange = function () {
+      schwelle = parseInt(this.value, 10) || 5;
+      merken('schwelle', schwelle);
+      // Gewichte der laufenden Sperren bleiben, aber neu geprüft wird sofort.
+      if (verkehrAn) verkehrPruefen(false);
+    };
+
+    $('s-tomtom').onchange = function () {
+      tomtomKey = this.value.trim();
+      merken('tomtom', tomtomKey);
+      $('s-tomtom-hinweis').textContent = tomtomKey
+        ? 'Schlüssel hinterlegt – Staus werden jetzt auch auf Land- und Stadtstraßen erkannt.'
+        : 'Ohne Schlüssel werden nur Autobahn-Staus erkannt.';
+      if (tomtomKey && verkehrAn) verkehrPruefen(false);
+    };
+
+    $('s-pruefen').onclick = function () { sheetZeigen(false); verkehrPruefen(false); };
+
+    $('s-stau').onclick = function () {
+      staumodus = !staumodus; stoppmodus = false; knopfStand();
+      sheetZeigen(false);
+      info(staumodus ? 'Auf den Stau tippen – die Route weicht dann aus' : 'Abgebrochen');
+    };
+
+    $('s-leeren').onclick = function () {
+      stopps = []; stoppMarkenZeichnen(); stoppListeZeichnen();
+      sperrenLeeren();
+      sheetZeigen(false);
+      info('Zwischenziele und Sperren gelöscht');
+      if (ziel) route();
     };
   }
 
@@ -582,32 +932,50 @@
     });
   }
 
-  /* ---------------------------------------------------------------- Start */
+  /* ------------------------------------------------------------------ Start */
   function start() {
-    try { nacht = localStorage.getItem('un-nacht') === '1'; } catch (e) {}
+    nacht       = geholt('nacht', '0') === '1';
+    blitzWarnen = geholt('blitzer', '1') === '1';
+    verkehrAn   = geholt('verkehr', '1') === '1';
+    sprache     = geholt('sprache', '0') === '1';
+    schwelle    = parseInt(geholt('schwelle', '5'), 10) || 5;
+    tomtomKey   = geholt('tomtom', '');
+
     kartenAufbau();
-    schalter('k-nacht', nacht);
     schalter('k-folgen', true);
+    schalter('k-sprache', sprache);
+    schalter('s-nacht', nacht);   $('s-nacht').textContent   = nacht ? 'an' : 'aus';
+    schalter('s-blitzer', blitzWarnen); $('s-blitzer').textContent = blitzWarnen ? 'an' : 'aus';
+    schalter('s-verkehr', verkehrAn);   $('s-verkehr').textContent = verkehrAn ? 'an' : 'aus';
+    $('s-schwelle').value = String(schwelle);
+    $('s-tomtom').value = tomtomKey;
+    if (tomtomKey) $('s-tomtom-hinweis').textContent =
+      'Schlüssel hinterlegt – Staus werden auch auf Land- und Stadtstraßen erkannt.';
+
     sucheAktivieren();
     knoepfeAktivieren();
     standortStarten();
     wachHalten();
+    profilBesorgen(false);
+    verkehrTaktStarten();
     info('Ziel eingeben oder lange auf die Karte drücken');
 
-    // Griff nach innen fuer den Pruefstand (pruefung.html). Ein Navi laesst
-    // sich am Schreibtisch sonst nicht testen, weil ohne Bewegung nichts
-    // passiert.
+    // Griff nach innen für den Prüfstand (pruefung.html). Ein Navi lässt sich
+    // am Schreibtisch sonst nicht testen, weil ohne Bewegung nichts passiert.
     window._navi = {
       karte: function () { return karte; },
       route: function () { return routePunkte; },
       hinweise: function () { return hinweise; },
       standort: function () { return standort; },
       sperren: function () { return sperren; },
-      varianten: function () { return varianten; }
+      blitzer: function () { return blitzer; },
+      refs: function () { return routeRefs; },
+      varianten: function () { return varianten; },
+      verkehrPruefen: verkehrPruefen,
+      profil: function () { return profilId; }
     };
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', start);
-  } else start();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
 })();

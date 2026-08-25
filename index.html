@@ -14,8 +14,8 @@
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <link rel="manifest" href="manifest.json">
   <title>Umfahrungsnavi</title>
-  <link rel="stylesheet" href="leaflet/leaflet.css?v=1">
-  <link rel="stylesheet" href="stil.css?v=1">
+  <link rel="stylesheet" href="leaflet/leaflet.css?v=2">
+  <link rel="stylesheet" href="stil.css?v=2">
 </head>
 <body>
 
@@ -27,20 +27,25 @@
     <div id="banner-text">
       <div id="banner-entfernung">–</div>
       <div id="banner-anweisung">–</div>
+      <div id="banner-danach" hidden></div>
     </div>
   </div>
 
-  <!-- Sperrzonen-Hinweis, wenn eine Umfahrung erzwungen wird -->
-  <div id="sperrfahne" hidden></div>
+  <!-- Blitzer- und Stauhinweise -->
+  <div id="fahnen">
+    <div id="blitzfahne" hidden></div>
+    <div id="stoerfahne" hidden></div>
+  </div>
 
   <div id="unten">
     <div id="suchzeile">
       <input id="suche" type="search" placeholder="Ziel eingeben" autocomplete="off"
              autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
-      <button id="suche-loeschen" title="Ziel loeschen" hidden>✕</button>
+      <button id="suche-loeschen" title="Ziel löschen" hidden>✕</button>
     </div>
     <div id="vorschlaege" hidden></div>
 
+    <div id="stoppliste" hidden></div>
     <div id="varianten" hidden></div>
 
     <div id="status">Suche Standort …</div>
@@ -48,14 +53,64 @@
     <div id="knoepfe">
       <button id="k-folgen"  class="an">Folgen</button>
       <button id="k-sprache">Ansage</button>
-      <button id="k-sperre">Stau hier</button>
+      <button id="k-stopp">+ Stopp</button>
       <button id="k-uebersicht">Übersicht</button>
-      <button id="k-nacht">Nacht</button>
+      <button id="k-mehr">Mehr</button>
     </div>
   </div>
 
-  <script src="leaflet/leaflet.js?v=1"></script>
-  <script src="app.js?v=1"></script>
+  <!-- Einstellungen; im Auto selten gebraucht, deshalb ausgeklappt statt fest -->
+  <div id="blende" hidden></div>
+  <div id="sheet" hidden>
+    <h2>Einstellungen</h2>
+
+    <div class="reihe">
+      <span>Nachtkarte</span>
+      <button id="s-nacht">aus</button>
+    </div>
+    <div class="reihe">
+      <span>Blitzer warnen</span>
+      <button id="s-blitzer" class="an">an</button>
+    </div>
+    <div class="reihe">
+      <span>Stau automatisch umfahren</span>
+      <button id="s-verkehr" class="an">an</button>
+    </div>
+
+    <label class="feld">
+      Ab wie viel Zeitverlust umfahren?
+      <select id="s-schwelle">
+        <option value="3">ab 3 Minuten – sehr aggressiv</option>
+        <option value="5" selected>ab 5 Minuten – aggressiv</option>
+        <option value="10">ab 10 Minuten – gelassen</option>
+        <option value="15">ab 15 Minuten – nur bei dicken Brocken</option>
+      </select>
+    </label>
+
+    <label class="feld">
+      TomTom-Schlüssel <small>für Staus abseits der Autobahn</small>
+      <input id="s-tomtom" type="text" placeholder="noch keiner hinterlegt"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      <small id="s-tomtom-hinweis">Ohne Schlüssel werden nur Autobahn-Staus erkannt
+        (amtliche Meldungen, kostenlos). Schlüssel gibt es kostenlos auf
+        developer.tomtom.com – 2.500 Abrufe im Monat.</small>
+    </label>
+
+    <div class="knopfreihe">
+      <button id="s-pruefen">Verkehr jetzt prüfen</button>
+      <button id="s-stau">Stau von Hand setzen</button>
+    </div>
+    <div class="knopfreihe">
+      <button id="s-leeren">Stopps &amp; Sperren löschen</button>
+      <button id="s-zu" class="an">Fertig</button>
+    </div>
+  </div>
+
+  <script src="leaflet/leaflet.js?v=2"></script>
+  <script src="verkehr.js?v=2"></script>
+  <!-- tut nichts, ausser die Adresse enthaelt ?pruefstand -->
+  <script src="pruefstand.js?v=2"></script>
+  <script src="app.js?v=2"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {
