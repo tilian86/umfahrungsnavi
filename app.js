@@ -698,7 +698,7 @@
       var v = varianten[variante];
       if (!routeRefs.length && v && v.messages) {
         // Kennungen nachholen, falls die Auskunft beim ersten Mal klemmte
-        window.Verkehr.refsErmitteln(v.messages, routePunkte).then(function (refs) {
+        window.Verkehr.refsErmitteln(v.messages || null, routePunkte).then(function (refs) {
           routeRefs = refs;
           verkehrPruefen(true);
         });
@@ -942,7 +942,8 @@
         }
 
         ersatzfahne(false);
-        varianten = auswaehlen(verschiedene(roh));
+        var luft = abstand(punkte[0], punkte[punkte.length - 1]) / 1000;
+        varianten = auswaehlen(verschiedene(roh), luft);
 
         // Zur zuletzt selbst gewaehlten Art zurueckfinden: erst gleiche Marke
         // (Schleichweg bleibt Schleichweg), sonst aehnliche Laenge.
@@ -971,7 +972,44 @@
   // wird nicht verdrängt: er ist auf dem Papier immer langsamer (er meidet ja
   // die schnellen Strassen) und wäre sonst nie dabei - obwohl er im Stau
   // genau der Vorschlag ist, um den es geht.
-  function auswaehlen(liste) {
+  // Unsinnige Vorschlaege aussortieren. Ein Umweg, der dreimal so lange
+  // dauert, ist kein Vorschlag - er ist ein Rechenfehler. Und eine Route, die
+  // ein Vielfaches der Luftlinie faehrt, hat meist eine Schleife drin.
+  function plausibel(liste, luftlinieKm) {
+    if (!liste.length) return liste;
+    var beste = liste[0];
+    liste.forEach(function (v) { if (v.min < beste.min) beste = v; });
+    // Die schnellste Route bleibt immer drin, auch wenn sie selbst eine
+    // Schleife enthaelt - ohne Route waere die App unbrauchbar.
+    var raus = liste.filter(function (v) {
+      if (v === beste) return true;
+      if (hatSchleife(v.koord)) return false;                 // dreht eine Runde
+      // Der Schleichweg darf laenger dauern - er wird ja gerade gewaehlt,
+      // WEIL die schnelle Strecke steht. Sein eigener Deckel steckt in
+      // auswaehlen(). Unsinnig weit darf er trotzdem nicht sein.
+      if (v.marke !== 'Schleichweg' && v.min > beste.min * 1.8) return false;
+      if (v.km > beste.km * 2.2) return false;                // absurd weit
+      if (luftlinieKm > 0.5 && v.km > luftlinieKm * 4) return false;
+      return true;
+    });
+    return raus.length ? raus : [beste];
+  }
+
+  // Schleifenerkennung: kommt die Route auf ein Feld zurueck, das sie viel
+  // frueher schon befahren hat, dreht sie eine Runde.
+  function hatSchleife(koord) {
+    if (koord.length < 40) return false;
+    var gesehen = {}, abstandNoetig = Math.floor(koord.length * 0.25);
+    for (var i = 0; i < koord.length; i++) {
+      var k = Math.round(koord[i][0] * 2200) + '/' + Math.round(koord[i][1] * 3300);
+      if (gesehen[k] !== undefined && i - gesehen[k] > abstandNoetig) return true;
+      if (gesehen[k] === undefined) gesehen[k] = i;
+    }
+    return false;
+  }
+
+  function auswaehlen(liste, luftlinieKm) {
+    liste = plausibel(liste, luftlinieKm);
     var schnellste = liste[0] ? liste[0].min : 0;
     var grenze = schleichErzwingen ? 2.5 : 1.6;
     schleichErzwingen = false;
@@ -1071,14 +1109,11 @@
         return { punkte: [punkte[0], seitwaerts(dickste.ort, seite, dickste.radius * 3.5)]
                             .concat(punkte.slice(1)), marke: '' };
       });
-    } else if (routePunkte.length > 20 && !fahrmodus) {
-      // Ohne Stau: zwei seitliche Vorschlaege zum Vergleichen
-      var mitte = routePunkte[Math.floor(routePunkte.length / 2)];
-      [1, -1].forEach(function (seite) {
-        anfragen.push({ punkte: [punkte[0], seitwaerts(mitte, seite, 1800)].concat(punkte.slice(1)),
-                        marke: '' });
-      });
     }
+    // KEINE kuenstlichen Alternativen mehr ueber seitliche Punkte: OSRM haengt
+    // so einen Punkt an die naechstgelegene Strasse - oft ein Feldweg oder die
+    // falsche Flussseite. Das ergab Schleifen und Vorschlaege mit 108 statt
+    // 11 Minuten. Lieber ein ehrlicher Vorschlag als drei unsinnige.
 
     return Promise.all(anfragen.map(function (a) { return osrmEinzel(a.punkte); }))
       .then(function (rohe) {
@@ -1104,7 +1139,9 @@
             return !v.koord.some(function (p) { return abstand(p, dickste.ort) < dickste.radius * 0.8; });
           }).concat(roh).slice(0, 3);
         }
-        varianten = verschiedene(roh).slice(0, 3);
+        var luft = abstand(punkte[0], punkte[punkte.length - 1]) / 1000;
+        varianten = plausibel(verschiedene(roh), luft).slice(0, 3);
+        if (!varianten.length) varianten = roh.slice(0, 1);
         variante = 0;
         variantenWaehlen(0);
         ersatzfahne(true, brouterGrund);
@@ -1268,6 +1305,7 @@
   // sonst wuerde jede Neuberechnung waehrend der Fahrt neue Abfragen ausloesen
   // und Overpass sperrt einen aus.
   function umgebungNachladen(v) {
+    if (!v) return;                       // Filter hat alles verworfen
     if (modus === 'auto') window.Verkehr.blitzerLaden(routePunkte, 25).then(function (b) {
       blitzer = b;
       blitzerZeichnen();
@@ -1276,7 +1314,7 @@
     // Kurz warten: direkt davor lief die Adresssuche ueber denselben Dienst,
     // und Nominatim drosselt bei zwei Anfragen in derselben Sekunde.
     setTimeout(function () {
-      window.Verkehr.refsErmitteln(v.messages, routePunkte).then(function (refs) {
+      window.Verkehr.refsErmitteln(v.messages || null, routePunkte).then(function (refs) {
         routeRefs = refs;
         if (verkehrAn) verkehrPruefen(true);
       });
