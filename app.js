@@ -215,10 +215,15 @@
     var druckTimer = null;
     function druckStart(e) {
       var p = [e.lngLat.lat, e.lngLat.lng];
+      var pixel = e.point || { x: karte.getContainer().clientWidth / 2,
+                               y: karte.getContainer().clientHeight / 2 };
       druckTimer = setTimeout(function () {
         druckTimer = null;
-        zielSetzen(p[0], p[1], 'Kartenpunkt');
-      }, 550);
+        // Nur ohne Ziel direkt setzen. Sonst fragen - ein versehentlicher
+        // langer Druck hat sonst das ganze Ziel ueberschrieben.
+        if (!ziel) zielSetzen(p[0], p[1], 'Kartenpunkt');
+        else kartenMenue(p, pixel);
+      }, 700);
     }
     function druckEnde() { if (druckTimer) { clearTimeout(druckTimer); druckTimer = null; } }
     karte.on('mousedown', druckStart);
@@ -295,6 +300,44 @@
     sperrenZeichnen();
   }
   function leer() { return { type: 'FeatureCollection', features: [] }; }
+
+  // Kleines Menue am Druckpunkt: was soll dieser Ort werden? Ohne das hat
+  // ein versehentlicher langer Druck das ganze Ziel ueberschrieben.
+  function kartenMenue(ort, pixel) {
+    menueSchliessen();
+    var m = document.createElement('div');
+    m.id = 'kartenmenue';
+    m.style.left = Math.min(Math.max(pixel.x - 80, 8),
+                            karte.getContainer().clientWidth - 168) + 'px';
+    m.style.top = Math.max(pixel.y - 130, 8) + 'px';
+    [['Neues Ziel', function () { zielSetzen(ort[0], ort[1], 'Kartenpunkt'); }],
+     ['Zwischenziel', function () { stoppHinzufuegen(ort[0], ort[1]); }],
+     ['Stau hier', function () {
+        sperreHinzufuegen({ ort: ort, radius: 220, minuten: 10,
+                            text: 'Stau von Hand', quelle: 'hand' });
+        if (ziel) route();
+      }],
+     ['Abbrechen', null]].forEach(function (eintrag) {
+      var b = document.createElement('button');
+      b.textContent = eintrag[0];
+      if (!eintrag[1]) b.className = 'ab';
+      b.onclick = function (e) {
+        e.stopPropagation();
+        menueSchliessen();
+        if (eintrag[1]) eintrag[1]();
+      };
+      m.appendChild(b);
+    });
+    document.body.appendChild(m);
+    setTimeout(function () {
+      document.addEventListener('click', menueSchliessen, { once: true });
+    }, 50);
+  }
+
+  function menueSchliessen() {
+    var offen = $('kartenmenue');
+    if (offen) offen.remove();
+  }
 
   function stilSetzen() {
     var st = STILE[nacht ? 'nacht' : 'tag'];
@@ -486,7 +529,22 @@
     f.hidden = false;
     f.textContent = 'Umfahrung aktiv · ' + sperren.length +
                     (sperren.length === 1 ? ' Störung' : ' Störungen') +
-                    (min ? ' · ' + Math.round(min) + ' min gespart' : '');
+                    (min ? ' · ' + Math.round(min) + ' min gespart' : '') + ' ›';
+  }
+
+  // Fahne antippen: zur Stoerung springen und sie benennen. Bei mehreren
+  // reihum durchgehen, damit man jede einzeln ansehen kann.
+  var stoerZeiger = 0;
+  function stoerungZeigen() {
+    if (!sperren.length) return;
+    stoerZeiger = stoerZeiger % sperren.length;
+    var sp = sperren[stoerZeiger];
+    stoerZeiger++;
+    folgenSetzen(false);
+    karte.easeTo({ center: [sp.ort[1], sp.ort[0]], zoom: 15, bearing: 0, pitch: 0, duration: 700 });
+    info(sp.text + (sperren.length > 1
+      ? ' · ' + stoerZeiger + '/' + sperren.length + ' – nochmal tippen für die nächste'
+      : ' · tippe den roten Kreis an, um sie zu löschen'));
   }
 
   // BRouter erwartet lon,lat,radius[,gewicht], mehrere durch | getrennt.
@@ -1604,6 +1662,7 @@
       if (stoppmodus) $('suche').value = '';
     };
 
+    $('stoerfahne').onclick = stoerungZeigen;
     $('k-stau').onclick = ausweichen;
 
     $('k-uebersicht').onclick = function () {

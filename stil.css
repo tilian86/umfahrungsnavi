@@ -160,6 +160,9 @@ html, body {
 #banner:not([hidden]) ~ #fahnen { top: calc(env(safe-area-inset-top) + 108px); }
 #fahnen > div { padding: 8px 12px; border-radius: 11px; font-size: 13.5px;
                 font-weight: 560; text-align: center; }
+/* die Stoerfahne ist antippbar - die anderen Fahnen nicht */
+#stoerfahne { pointer-events: auto; cursor: pointer; }
+#stoerfahne:active { filter: brightness(1.15); }
 #fahnen > div[hidden] { display: none; }
 #blitzfahne { background: rgba(230, 170, 20, .95); color: #1a1400; }
 #ersatzfahne { background: rgba(120, 90, 160, .95); font-size: 12.5px; }
@@ -275,3 +278,20 @@ html, body {
 #banner-spuren span.an { background: #1f6feb; color: #fff; }
 
 #sheet .hinweis { font-size: 11.5px; opacity: .6; line-height: 1.45; margin-top: -4px; }
+
+/* Menue am langen Druck auf die Karte */
+#kartenmenue {
+  position: absolute; z-index: 700; width: 160px;
+  display: flex; flex-direction: column; gap: 1px; overflow: hidden;
+  border-radius: 12px; background: rgba(30,36,44,.98);
+  border: 1px solid rgba(255,255,255,.16);
+  box-shadow: 0 8px 24px rgba(0,0,0,.5);
+}
+#kartenmenue button {
+  padding: 12px 14px; border: 0; background: transparent; color: #f2f4f6;
+  font: 15px -apple-system, sans-serif; text-align: left;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+}
+#kartenmenue button:last-child { border-bottom: 0; }
+#kartenmenue button.ab { color: rgba(242,244,246,.5); }
+#kartenmenue button:active { background: rgba(255,255,255,.1); }
