@@ -29,6 +29,17 @@
   // Umweg lohnt, solange er kürzer ist als das, was der Stau kostet."
   var METER_JE_MINUTE = 800;
 
+  // Eingebauter TomTom-Schluessel als Voreinstellung. Bewusste Entscheidung:
+  // Gratis-Schluessel ohne hinterlegte Zahlungsdaten - schlimmstenfalls
+  // verbraucht ein Fremder das Freikontingent, mehr kann nicht passieren.
+  // Dafuer funktioniert der Stadtverkehr auf jedem Geraet sofort, auch nach
+  // dem Neuanlegen der Homescreen-Kachel (iOS gibt der App dann einen
+  // frischen, leeren Speicher - daran gingen die Schluessel bisher verloren).
+  // Im TomTom-Portal sollte der Schluessel auf tilian86.github.io
+  // eingeschraenkt werden, dann ist auch das Kontingent geschuetzt.
+  // Ein selbst eingetragener Schluessel (Mehr -> TomTom) geht immer vor.
+  var TOMTOM_STANDARD = 'XRnLd3ee3n7JpJG3ZzcDKTWLUybljt3A';
+
   // Stadtmodus. `vmax` deckelt die Rechengeschwindigkeit auf allen Strassen.
   // Bei 130 ist die Bundesstrasse dem 30er-Wohngebiet dreifach ueberlegen -
   // dann flieht die Route bei Stau lieber 4 km ueber die B27, statt 500 m
@@ -77,6 +88,7 @@
   var vorschlagTimer = null, letzteSuche = 0;
   var verkehrTimer = null, letzterVerkehr = 0, verkehrLaeuft = false;
   var schleichErzwingen = false;
+  var letzteStoerungsLage = null, letzteVerkehrsRoute = 0;
   var fahrmodus = false, drehung = 0, zoomStufe = 0, tempoKmh = 0;
   var kumWeg = [], limits = [], limitAktuell = null, limitGesagt = null;
   var verkehrKarteAn = true;
@@ -531,6 +543,23 @@
       .then(function (stoerungen) {
         verkehrLaeuft = false;
         $('k-verkehr').classList.remove('an');
+
+        // Rueckkopplung verhindern: dieselbe Stoerungslage wie beim letzten
+        // Mal loest weder Ansage noch Neuberechnung aus. Sonst entsteht eine
+        // Schleife (route -> pruefen -> dieselben Stoerungen -> route ...),
+        // die alle paar Sekunden "2 Stoerungen, ich suche eine Umfahrung"
+        // durchsagt - genau so im echten Betrieb passiert.
+        var lage = stoerungen.map(function (st) {
+          return st.ort[0].toFixed(3) + ',' + st.ort[1].toFixed(3) + '|' + Math.round(st.minuten);
+        }).sort().join(';');
+        if (lage === letzteStoerungsLage) {
+          if (!stillschweigend) info(stoerungen.length
+            ? 'Verkehrslage unverändert – Umfahrung bleibt'
+            : 'Freie Fahrt – keine Störung ab ' + schwelle + ' min');
+          return;
+        }
+        letzteStoerungsLage = lage;
+
         var vorher = sperren.filter(function (s) { return s.quelle !== 'hand'; }).length;
         sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic');
         stoerungen.forEach(sperreHinzufuegen);
@@ -550,6 +579,7 @@
             ? 'Stau voraus, ' + min + ' Minuten. Ich suche eine Umfahrung.'
             : stoerungen.length + ' Störungen voraus, zusammen ' + min +
               ' Minuten. Ich suche eine Umfahrung.'); }
+        letzteVerkehrsRoute = Date.now();
         route();
       })
       .catch(function () {
@@ -976,8 +1006,23 @@
     limits = limitsAus(v.messages);
     limitAktuell = null; limitGesagt = null;
     abseitsZaehler = 0;
+    // Schon Angesagtes nicht wiederholen: die neuen Hinweise erben die
+    // "gesagt"-Marken der alten, wenn sie am selben Ort liegen. Ohne das
+    // wiederholt jede Neuberechnung die gerade laufende Ansage ("in 20 Metern
+    // links abbiegen"), weil die Marken sonst komplett geleert werden.
+    var alteHinweise = hinweise, altesGesagt = gesagt;
     gesagt = {};
     hinweise = hinweiseBauen(v);
+    hinweise.forEach(function (h, i) {
+      for (var j = 0; j < alteHinweise.length; j++) {
+        if (abstand(h.ort, alteHinweise[j].ort) < 30) {
+          ['ton', 'jetzt', 'weg'].forEach(function (art) {
+            if (altesGesagt[art + j]) gesagt[art + i] = true;
+          });
+          break;
+        }
+      }
+    });
     if (modus === 'auto') spurenAnheften([standort || v.koord[0]].concat(stopps.map(function (sp) { return sp.ort; }), [ziel || v.koord[v.koord.length - 1]]));
 
     variantenZeigen();
@@ -1520,12 +1565,13 @@
     };
 
     $('s-tomtom').onchange = function () {
-      tomtomKey = this.value.trim();
-      merken('tomtom', tomtomKey);
-      $('s-tomtom-hinweis').textContent = tomtomKey
-        ? 'Schlüssel hinterlegt – Staus werden jetzt auch auf Land- und Stadtstraßen erkannt.'
-        : 'Ohne Schlüssel werden nur Autobahn-Staus erkannt.';
-      if (tomtomKey && verkehrAn) verkehrPruefen(false);
+      var eigener = this.value.trim();
+      merken('tomtom', eigener);
+      tomtomKey = eigener || TOMTOM_STANDARD;
+      $('s-tomtom-hinweis').textContent = eigener
+        ? 'Eigener Schlüssel hinterlegt.'
+        : 'Eingebauter Schlüssel aktiv.';
+      if (verkehrAn) verkehrPruefen(false);
     };
 
     $('k-verkehr').onclick = function () {
@@ -1582,16 +1628,21 @@
     stadtmodus  = geholt('stadt', 'auto');
     tomtomKey   = geholt('tomtom', '');
 
-    // Schluessel-Uebergabe per Adresse: ?key=... wird einmal eingelesen und
-    // gemerkt. So laesst sich der TomTom-Schluessel als Link aufs Handy
-    // bringen, statt ihn abzutippen. Aus der Adresszeile wird er entfernt;
-    // in der Homescreen-App bleibt er in der Start-URL - dort sieht ihn keiner.
+    // Schluessel-Uebergabe per Adresse (?key=...) geht vor dem gespeicherten;
+    // fehlt beides, greift der eingebaute Standard. Die Adresszeile wird nur
+    // im Browser aufgeraeumt - die Homescreen-App behaelt ihre Start-URL
+    // (dort sieht sie niemand, und sie ueberlebt jeden Speicherverlust).
     var km = location.search.match(/[?&]key=([A-Za-z0-9_-]{16,})/);
     if (km) {
       tomtomKey = km[1];
       merken('tomtom', tomtomKey);
-      try { history.replaceState(null, '', location.pathname); } catch (e) {}
+      var standalone = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches;
+      if (!standalone) try { history.replaceState(null, '', location.pathname); } catch (e) {}
     }
+    if (!tomtomKey) tomtomKey = TOMTOM_STANDARD;
+
+    // iOS darf die Daten nicht nach 7 Tagen Safari-Inaktivitaet wegwerfen
+    try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
 
     kartenAufbau();
     schalter('k-folgen', true);
@@ -1605,9 +1656,11 @@
     schalter('s-schotter', schotterOk);   $('s-schotter').textContent = schotterOk ? 'an' : 'aus';
     $('s-schwelle').value = String(schwelle);
     $('s-stadt').value = stadtmodus;
-    $('s-tomtom').value = tomtomKey;
-    if (tomtomKey) $('s-tomtom-hinweis').textContent =
-      'Schlüssel hinterlegt – Staus werden auch auf Land- und Stadtstraßen erkannt.';
+    $('s-tomtom').value = geholt('tomtom', '');
+    if (tomtomKey) $('s-tomtom-hinweis').textContent = geholt('tomtom', '')
+      ? 'Eigener Schlüssel hinterlegt – Staus werden auch in der Stadt erkannt.'
+      : 'Eingebauter Schlüssel aktiv – Stadtverkehr funktioniert ohne Zutun. '
+        + 'Ein eigener Schlüssel hier drin geht vor.';
 
     sucheAktivieren();
     knoepfeAktivieren();
