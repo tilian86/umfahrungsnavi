@@ -73,6 +73,9 @@
   var standort = null, kurs = null, ziel = null, zielName = '';
   var stopps = [];                       // [{ort:[lat,lon], name:''}]
   var varianten = [], variante = 0;
+  // Was der Fahrer zuletzt SELBST gewaehlt hat. Ohne das springt jede
+  // Neuberechnung zurueck auf Vorschlag 1 - die Wahl wirkte "verselbstaendigt".
+  var variantenWunsch = null;
   var hinweise = [], gesagt = {}, letzterText = '';
   var routePunkte = [], routeRefs = [], blitzer = [];
   var sperren = [];                      // {ort,radius,gewicht,hart,text,quelle,kreis}
@@ -84,10 +87,16 @@
   var profilId = null;
   var profilNeuVersucht = false;
   var brouterGrund = '';
+  // Wenn BRouter drosselt, hilft weiteres Anklopfen nicht - es verlaengert
+  // die Sperre eher. Deshalb Pause einlegen und solange den Ersatzdienst
+  // nehmen. Nach Ablauf wird beim naechsten Routing wieder BRouter versucht.
+  var brouterPauseBis = 0;
+  var BROUTER_PAUSE = 10 * 60 * 1000;
   var abseitsZaehler = 0, letzteNeu = 0, laeuft = 0;
   var vorschlagTimer = null, letzteSuche = 0;
   var verkehrTimer = null, letzterVerkehr = 0, verkehrLaeuft = false;
   var schleichErzwingen = false;
+  var alternativenGewuenscht = false;
   var letzteStoerungsLage = null, letzteVerkehrsRoute = 0;
   var fahrmodus = false, drehung = 0, zoomStufe = 0, tempoKmh = 0;
   var kumWeg = [], limits = [], limitAktuell = null, limitGesagt = null;
@@ -467,7 +476,7 @@
     var f = $('ersatzfahne');
     f.hidden = !an;
     if (an) f.textContent = '⚠︎ Ersatzdienst' + (grund ? ' · ' + grund : '') +
-                            ' · nur eine Route, keine Stauumfahrung';
+                            ' · Umfahrung eingeschränkt';
   }
 
   function stoerfahne() {
@@ -579,6 +588,9 @@
             ? 'Stau voraus, ' + min + ' Minuten. Ich suche eine Umfahrung.'
             : stoerungen.length + ' Störungen voraus, zusammen ' + min +
               ' Minuten. Ich suche eine Umfahrung.'); }
+        // Mindestens zwei Minuten zwischen verkehrsbedingten Neuberechnungen -
+        // sonst schaukeln sich wechselnde Meldungen zu einem Flackern auf.
+        if (Date.now() - letzteVerkehrsRoute < 120000) return;
         letzteVerkehrsRoute = Date.now();
         route();
       })
@@ -719,6 +731,7 @@
     $('blitzfahne').hidden = true;
     $('suche').value = '';
     $('suche-loeschen').hidden = true;
+    ersatzfahne(false);
     fahrmodusAnwenden();
     info('Ziel gelöscht');
   }
@@ -734,6 +747,18 @@
     var nogos = nogoParameter();
 
     var radfahrt = modus === 'rad';
+
+    // Waehrend der Fahrt (Abweichung, Stauwechsel) braucht es KEINE
+    // Auswahl - nur den besten Weg. Das spart drei Viertel der Anfragen und
+    // war der eigentliche Grund fuer die Drosselung: sechs Anfragen bei
+    // jeder Neuberechnung summieren sich auf einer Fahrt schnell zu Hunderten.
+    // Waehrend der Fahrt reicht der beste Weg - die Auswahl holt man sich
+    // bewusst ueber "Übersicht". Das spart drei Viertel der Anfragen.
+    var nurHaupt = !!(fahrmodus && varianten.length && !schleichErzwingen && !alternativenGewuenscht);
+    alternativenGewuenscht = false;
+
+    if (Date.now() < brouterPauseBis) return osrmRoute(punkte, lauf);
+
     (radfahrt ? Promise.resolve('trekking') : profilBesorgen(false)).then(function (prof) {
       // Mehrere Kandidaten, damit am Ende wirklich drei *verschiedene* übrig
       // bleiben. BRouters Alternativen ähneln sich oft; die Anfrage ohne
@@ -744,8 +769,9 @@
         { zusatz: '&alternativeidx=2', marke: '' },
         { zusatz: '&alternativeidx=0&profile:avoid_motorways=1', marke: '' }
       ];
-      if (radfahrt) kandidaten = kandidaten.slice(0, 3);   // Autobahn-Variante sinnlos
-      if (!radfahrt && (stadtmodusGilt(punkte) || schleichErzwingen)) {
+      if (nurHaupt) kandidaten = kandidaten.slice(0, 1);
+      else if (radfahrt) kandidaten = kandidaten.slice(0, 3);   // Autobahn-Variante sinnlos
+      if (!nurHaupt && !radfahrt && (stadtmodusGilt(punkte) || schleichErzwingen)) {
         kandidaten.push({
           zusatz: '&alternativeidx=0&profile:vmax=' + STADT_VMAX, marke: 'Schleichweg'
         });
@@ -758,24 +784,37 @@
       var wege = radfahrt ? '' :
         (feldwegeFrei ? '&profile:feldwege_frei=1' : '') +
         (schotterOk ? '&profile:schotter_ok=1' : '');
-      var anfragen = kandidaten.map(function (k) {
+      function hole(k) {
         return fetch(BROUTER + '?lonlats=' + ll + '&profile=' + prof +
                      '&format=geojson&timode=2' + k.zusatz + wege + nogos)
           .then(function (r) {
             if (!r.ok) {
-              // 403 ist BRouters eigene Drosselung ("Please, retry later!"),
-              // sie haengt an der IP und loest sich von selbst wieder.
-              brouterGrund = r.status === 403 ? 'BRouter drosselt gerade'
-                                              : 'BRouter antwortet nicht';
+              // 403 ist BRouters eigene Drosselung ("Please, retry later!").
+              // Sie haengt an der IP und loest sich von selbst wieder.
+              if (r.status === 403) {
+                brouterGrund = 'BRouter drosselt gerade';
+                brouterPauseBis = Date.now() + BROUTER_PAUSE;
+              } else brouterGrund = 'BRouter antwortet nicht';
               return null;
             }
             return r.json();
           })
           .then(function (g) { return g ? { geo: g, marke: k.marke } : null; })
           .catch(function () { return null; });
+      }
+
+      // Erst NUR den Hauptweg holen. Antwortet BRouter nicht, sind wir nach
+      // einer Anfrage draussen statt nach sechs - genau die sechs Fehlschlaege
+      // bei jeder Berechnung haben die Drosselung am Leben gehalten.
+      // Die Alternativen kommen erst nach, wenn der Hauptweg da ist.
+      var anfragen = hole(kandidaten[0]).then(function (haupt) {
+        if (!haupt) return [null];
+        if (kandidaten.length === 1) return [haupt];
+        return Promise.all(kandidaten.slice(1).map(hole))
+          .then(function (rest) { return [haupt].concat(rest); });
       });
 
-      Promise.all(anfragen).then(function (ergebnisse) {
+      anfragen.then(function (ergebnisse) {
         if (lauf !== laeuft) return;               // eine neuere Anfrage läuft
         if (!ergebnisse.some(Boolean)) {
           // Profil bei BRouter weggeraeumt? Einmal neu hochladen, dann nochmal.
@@ -816,8 +855,25 @@
 
         ersatzfahne(false);
         varianten = auswaehlen(verschiedene(roh));
+
+        // Zur zuletzt selbst gewaehlten Art zurueckfinden: erst gleiche Marke
+        // (Schleichweg bleibt Schleichweg), sonst aehnliche Laenge.
         variante = 0;
-        variantenWaehlen(0);
+        if (variantenWunsch && varianten.length > 1) {
+          var treffer = -1;
+          varianten.forEach(function (v, i) {
+            if (treffer < 0 && (v.marke || '') === variantenWunsch.marke) treffer = i;
+          });
+          if (treffer < 0) {
+            var beste = Infinity;
+            varianten.forEach(function (v, i) {
+              var d = Math.abs(v.km - variantenWunsch.km);
+              if (d < beste) { beste = d; treffer = i; }
+            });
+          }
+          if (treffer >= 0) variante = treffer;
+        }
+        variantenWaehlen(variante);
         umgebungNachladen(varianten[0]);
       });
     });
@@ -860,17 +916,89 @@
   var OSRM_WINKEL = { 'uturn': 180, 'sharp right': 135, 'right': 90, 'slight right': 45,
                       'straight': 0, 'slight left': -45, 'left': -90, 'sharp left': -135 };
 
-  function osrmRoute(punkte, lauf) {
+  // OSRM kennt keine Sperrzonen. Umfahren geht trotzdem: einen Zwischenpunkt
+  // seitlich neben den Stau setzen, dann MUSS die Route dort vorbei. Die
+  // Seite wird danach geprueft - fuehrt der Weg immer noch mitten durch die
+  // Sperre, wird die andere Seite versucht.
+  function umweggPunkt(sperre, seite) {
+    var idx = 0, best = Infinity;
+    for (var i = 0; i < routePunkte.length; i++) {
+      var d = abstand(sperre.ort, routePunkte[i]);
+      if (d < best) { best = d; idx = i; }
+    }
+    var a = routePunkte[Math.max(0, idx - 3)];
+    var b = routePunkte[Math.min(routePunkte.length - 1, idx + 3)];
+    var kurs = window.Verkehr.peilung(a, b);
+    var quer = (kurs + seite * 90) * Math.PI / 180;
+    var weit = sperre.radius * 3.5;
+    var t = Math.PI / 180;
+    return [sperre.ort[0] + weit * Math.cos(quer) / 110540,
+            sperre.ort[1] + weit * Math.sin(quer) / (111320 * Math.cos(sperre.ort[0] * t))];
+  }
+
+  function trifftSperre(koord) {
+    return sperren.some(function (sp) {
+      return koord.some(function (p) { return abstand(p, sp.ort) < sp.radius * 0.8; });
+    });
+  }
+
+  // Seitlich versetzter Punkt neben einem Ort auf der Route - Grundlage
+  // sowohl fuer Stau-Umfahrung als auch fuer echte Alternativvorschlaege.
+  function seitwaerts(ort, seite, weit) {
+    var idx = 0, best = Infinity;
+    for (var i = 0; i < routePunkte.length; i++) {
+      var d = abstand(ort, routePunkte[i]);
+      if (d < best) { best = d; idx = i; }
+    }
+    var a = routePunkte[Math.max(0, idx - 3)];
+    var b = routePunkte[Math.min(routePunkte.length - 1, idx + 3)];
+    var quer = (window.Verkehr.peilung(a, b) + seite * 90) * Math.PI / 180;
+    var t = Math.PI / 180;
+    return [ort[0] + weit * Math.cos(quer) / 110540,
+            ort[1] + weit * Math.sin(quer) / (111320 * Math.cos(ort[0] * t))];
+  }
+
+  function osrmEinzel(punkte) {
     var koords = punkte.map(function (p) { return p[1] + ',' + p[0]; }).join(';');
-    return fetch((modus === 'rad' ? OSRM_RAD : OSRM) + koords + '?overview=full&geometries=geojson&steps=true&alternatives=true')
+    return fetch((modus === 'rad' ? OSRM_RAD : OSRM) + koords +
+                 '?overview=full&geometries=geojson&steps=true')
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (d) {
+      .then(function (d) { return (d && d.routes && d.routes[0]) || null; })
+      .catch(function () { return null; });
+  }
+
+  function osrmRoute(punkte, lauf) {
+    // OSRM kennt keine Sperrzonen und liefert praktisch nie Alternativen.
+    // Beides laesst sich mit Zwischenpunkten nachbauen: ein Punkt seitlich
+    // neben dem Stau erzwingt die Umfahrung, Punkte seitlich der Streckenmitte
+    // erzeugen echte Alternativvorschlaege.
+    var anfragen = [{ punkte: punkte, marke: '' }];
+
+    var dickste = null;
+    if (routePunkte.length) {
+      sperren.forEach(function (sp) { if (!dickste || sp.minuten > dickste.minuten) dickste = sp; });
+    }
+    if (dickste) {
+      anfragen = [1, -1].map(function (seite) {
+        return { punkte: [punkte[0], seitwaerts(dickste.ort, seite, dickste.radius * 3.5)]
+                            .concat(punkte.slice(1)), marke: '' };
+      });
+    } else if (routePunkte.length > 20 && !fahrmodus) {
+      // Ohne Stau: zwei seitliche Vorschlaege zum Vergleichen
+      var mitte = routePunkte[Math.floor(routePunkte.length / 2)];
+      [1, -1].forEach(function (seite) {
+        anfragen.push({ punkte: [punkte[0], seitwaerts(mitte, seite, 1800)].concat(punkte.slice(1)),
+                        marke: '' });
+      });
+    }
+
+    return Promise.all(anfragen.map(function (a) { return osrmEinzel(a.punkte); }))
+      .then(function (rohe) {
         if (lauf !== laeuft) return;
-        if (!d || !d.routes || !d.routes.length) {
-          info('Routendienst nicht erreichbar – später nochmal versuchen');
-          return;
-        }
-        varianten = d.routes.slice(0, 3).map(function (rt) {
+        var gut = rohe.filter(Boolean);
+        if (!gut.length) { info('Routendienst nicht erreichbar – später nochmal'); return; }
+
+        var roh = gut.map(function (rt) {
           return {
             koord: rt.geometry.coordinates.map(function (c) { return [c[1], c[0]]; }),
             hinweise: [],
@@ -879,9 +1007,16 @@
             min: Math.round(rt.duration / 60),
             messages: null,
             art: { wohn: 0, anlieger: 0, gesamt: 0 },
-            marke: 'Ersatz'
+            marke: ''
           };
         });
+        // Bei Stau: die Variante bevorzugen, die wirklich aussen herum geht
+        if (dickste) {
+          roh = roh.filter(function (v) {
+            return !v.koord.some(function (p) { return abstand(p, dickste.ort) < dickste.radius * 0.8; });
+          }).concat(roh).slice(0, 3);
+        }
+        varianten = verschiedene(roh).slice(0, 3);
         variante = 0;
         variantenWaehlen(0);
         ersatzfahne(true, brouterGrund);
@@ -986,7 +1121,10 @@
                     v.min + ' min<br>' + uhrzeit(v.min) + '<br>' +
                     v.km.toFixed(1) + ' km' + zusatz;
       if (i === variante) b.className = 'gewaehlt';
-      b.onclick = function () { variantenWaehlen(i); };
+      b.onclick = function () {
+        variantenWunsch = { marke: v.marke || '', km: v.km };
+        variantenWaehlen(i);
+      };
       leiste.appendChild(b);
     });
   }
@@ -1306,9 +1444,13 @@
   // abseits, damit ein GPS-Ausreisser nicht gleich eine neue Route auslöst.
   function abweichungPruefen(ll) {
     if (!routePunkte.length) return;
-    if (abstandZurRoute(ll) > 50) {
+    // 50 m sind auf Landstrassen und bei ungenauem GPS schnell erreicht;
+    // zusammen mit 12 s Pause fuehrte das zu staendigem Neuberechnen, das sich
+    // wie "hin und her schalten" anfuehlt. 70 m und 40 s Ruhe sind stabil,
+    // ohne eine echte Abfahrt zu verschlafen.
+    if (abstandZurRoute(ll) > 70) {
       abseitsZaehler++;
-      if (abseitsZaehler >= 3 && Date.now() - letzteNeu > 12000) {
+      if (abseitsZaehler >= 4 && Date.now() - letzteNeu > 40000) {
         letzteNeu = Date.now(); abseitsZaehler = 0;
         info('Abseits der Route – berechne neu …');
         if (sprache) { letzterText = ''; sagen('Route wird neu berechnet'); }
@@ -1467,6 +1609,14 @@
     $('k-uebersicht').onclick = function () {
       if (routePunkte.length) {
         folgenSetzen(false);
+        // In der Übersicht will man vergleichen und waehlen. Liegt nur noch
+        // ein Weg vor (waehrend der Fahrt wird gespart), die Alternativen
+        // vom aktuellen Standort aus nachholen.
+        if (varianten.length < 2 && ziel) {
+          alternativenGewuenscht = true;
+          info('Hole Alternativen …');
+          route();
+        }
         var b = new maplibregl.LngLatBounds();
         routePunkte.forEach(function (p) { b.extend(m(p)); });
         sperren.forEach(function (sp) { b.extend(m(sp.ort)); });
