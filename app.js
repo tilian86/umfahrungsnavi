@@ -212,20 +212,26 @@
     karte.once('style.load', ebenenAnlegen);
 
     // Langer Druck setzt das Ziel - auf dem Handy gibt es kein Rechtsklick.
-    var druckTimer = null;
+    // iOS/Safari feuert fuer dieselbe Beruehrung BEIDE Ereignisse: touchstart
+    // und kurz darauf mousedown. Ohne Sperre liefen dadurch zwei Zeitgeber -
+    // einer setzte still ein Ziel, der andere oeffnete das Menue. Genau so
+    // ging im Betrieb das eingegebene Ziel verloren.
+    var druckTimer = null, druckSperre = 0;
     function druckStart(e) {
+      var jetzt = Date.now();
+      if (jetzt - druckSperre < 800) return;      // dasselbe Antippen
+      druckSperre = jetzt;
+      clearTimeout(druckTimer);
       var p = [e.lngLat.lat, e.lngLat.lng];
       var pixel = e.point || { x: karte.getContainer().clientWidth / 2,
                                y: karte.getContainer().clientHeight / 2 };
       druckTimer = setTimeout(function () {
         druckTimer = null;
-        // Nur ohne Ziel direkt setzen. Sonst fragen - ein versehentlicher
-        // langer Druck hat sonst das ganze Ziel ueberschrieben.
-        if (!ziel) zielSetzen(p[0], p[1], 'Kartenpunkt');
-        else kartenMenue(p, pixel);
+        // Immer fragen - nie stillschweigend etwas ueberschreiben.
+        kartenMenue(p, pixel);
       }, 700);
     }
-    function druckEnde() { if (druckTimer) { clearTimeout(druckTimer); druckTimer = null; } }
+    function druckEnde() { clearTimeout(druckTimer); druckTimer = null; }
     karte.on('mousedown', druckStart);
     karte.on('touchstart', druckStart);
     ['mouseup', 'touchend', 'mousemove', 'touchmove', 'zoomstart', 'dragstart'].forEach(function (t) {
@@ -307,22 +313,44 @@
     menueSchliessen();
     var m = document.createElement('div');
     m.id = 'kartenmenue';
+    var hoehe = 4 * 46 + 8;
     m.style.left = Math.min(Math.max(pixel.x - 80, 8),
                             karte.getContainer().clientWidth - 168) + 'px';
-    m.style.top = Math.max(pixel.y - 130, 8) + 'px';
-    [['Neues Ziel', function () { zielSetzen(ort[0], ort[1], 'Kartenpunkt'); }],
-     ['Zwischenziel', function () { stoppHinzufuegen(ort[0], ort[1]); }],
-     ['Stau hier', function () {
+    // Deutlich ueber dem Finger: sonst landet der Klick beim Loslassen auf
+    // einem Menuepunkt und loest ihn sofort aus.
+    m.style.top = Math.max(pixel.y - hoehe - 40, 8) + 'px';
+
+    // Reihenfolge bewusst: das Harmlose oben, das Ersetzen ganz unten.
+    var eintraege = [];
+    if (ziel) {
+      eintraege.push(['Zwischenziel', function () { stoppHinzufuegen(ort[0], ort[1]); }]);
+      eintraege.push(['Stau hier', function () {
         sperreHinzufuegen({ ort: ort, radius: 220, minuten: 10,
                             text: 'Stau von Hand', quelle: 'hand' });
-        if (ziel) route();
-      }],
-     ['Abbrechen', null]].forEach(function (eintrag) {
+        route();
+      }]);
+      eintraege.push(['Ziel ersetzen', function () { zielSetzen(ort[0], ort[1], 'Kartenpunkt'); }]);
+    } else {
+      eintraege.push(['Als Ziel', function () { zielSetzen(ort[0], ort[1], 'Kartenpunkt'); }]);
+      eintraege.push(['Zwischenziel', function () { stoppHinzufuegen(ort[0], ort[1]); }]);
+      eintraege.push(['Stau hier', function () {
+        sperreHinzufuegen({ ort: ort, radius: 220, minuten: 10,
+                            text: 'Stau von Hand', quelle: 'hand' });
+      }]);
+    }
+    eintraege.push(['Abbrechen', null]);
+
+    // Erst nach kurzer Schutzzeit bedienbar - der Klick beim Loslassen der
+    // langen Beruehrung darf nichts ausloesen.
+    var frei = Date.now() + 400;
+    eintraege.forEach(function (eintrag) {
       var b = document.createElement('button');
       b.textContent = eintrag[0];
       if (!eintrag[1]) b.className = 'ab';
+      if (eintrag[0] === 'Ziel ersetzen') b.className = 'ernst';
       b.onclick = function (e) {
         e.stopPropagation();
+        if (Date.now() < frei) return;
         menueSchliessen();
         if (eintrag[1]) eintrag[1]();
       };
@@ -331,7 +359,7 @@
     document.body.appendChild(m);
     setTimeout(function () {
       document.addEventListener('click', menueSchliessen, { once: true });
-    }, 50);
+    }, 450);
   }
 
   function menueSchliessen() {
@@ -448,7 +476,9 @@
 
   function stoppListeZeichnen() {
     var l = $('stoppliste');
-    if (!stopps.length) { l.hidden = true; return; }
+    // Auch leeren, nicht nur verstecken - sonst bleiben tote Knoepfe im
+    // Dokument stehen und lassen sich weiter antippen.
+    if (!stopps.length) { l.hidden = true; l.innerHTML = ''; return; }
     l.hidden = false;
     l.innerHTML = '';
     stopps.forEach(function (s, i) {
@@ -1161,7 +1191,7 @@
 
   function variantenZeigen() {
     var leiste = $('varianten');
-    if (varianten.length < 2) { leiste.hidden = true; return; }
+    if (varianten.length < 2) { leiste.hidden = true; leiste.innerHTML = ''; return; }
     leiste.hidden = false;
     leiste.innerHTML = '';
     var schnellste = varianten.reduce(function (a, c) { return c.min < a.min ? c : a; });

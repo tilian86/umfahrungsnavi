@@ -294,4 +294,5 @@ html, body {
 }
 #kartenmenue button:last-child { border-bottom: 0; }
 #kartenmenue button.ab { color: rgba(242,244,246,.5); }
+#kartenmenue button.ernst { color: #ff9c8a; }
 #kartenmenue button:active { background: rgba(255,255,255,.1); }
