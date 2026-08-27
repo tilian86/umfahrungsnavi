@@ -116,11 +116,14 @@
   // fetch mit Zeitlimit. Ohne das bleibt eine Anfrage bei stehender
   // Mobilverbindung fuer immer offen, die Promise-Kette settled nie und die
   // Statuszeile klebt auf "Berechne Route ...".
-  function hol(url, ms) {
-    if (!window.AbortController) return fetch(url);
+  function hol(url, ms, opt) {
+    if (!window.AbortController) return fetch(url, opt);
     var ab = new AbortController();
     var uhr = setTimeout(function () { ab.abort(); }, ms || 15000);
-    return fetch(url, { signal: ab.signal })
+    var o = {};
+    for (var k in (opt || {})) o[k] = opt[k];
+    o.signal = ab.signal;
+    return fetch(url, o)
       .then(function (r) { clearTimeout(uhr); return r; },
             function (e) { clearTimeout(uhr); throw e; });
   }
@@ -854,10 +857,10 @@
     var gemerkt = geholt('profilid', '');
     if (geholt('profilv', '') !== PROFIL_VERSION) { gemerkt = ''; merken('profilv', PROFIL_VERSION); }
     if (gemerkt && !erzwingen) { profilId = gemerkt; return Promise.resolve(profilId); }
-    return fetch(PROFIL_DATEI)
+    return hol(PROFIL_DATEI, 15000)
       .then(function (r) { return r.text(); })
       .then(function (txt) {
-        return fetch(BROUTER + '/profile', { method: 'POST', body: txt });
+        return hol(BROUTER + '/profile', 20000, { method: 'POST', body: txt });
       })
       .then(function (r) { return r.json(); })
       .then(function (d) {
@@ -984,8 +987,8 @@
         (feldwegeFrei ? '&profile:feldwege_frei=1' : '') +
         (schotterOk ? '&profile:schotter_ok=1' : '');
       function hole(k) {
-        return fetch(BROUTER + '?lonlats=' + ll + '&profile=' + (k.profil || prof) +
-                     '&format=geojson&timode=2' + k.zusatz + wege + nogos)
+        return hol(BROUTER + '?lonlats=' + ll + '&profile=' + (k.profil || prof) +
+                   '&format=geojson&timode=2' + k.zusatz + wege + nogos, 20000)
           .then(function (r) {
             if (!r.ok) {
               // 403 ist BRouters eigene Drosselung ("Please, retry later!").
@@ -1013,7 +1016,10 @@
           .then(function (rest) { return [haupt].concat(rest); });
       });
 
-      anfragen.then(function (ergebnisse) {
+      // Zurueckgeben, nicht nur anstossen: sonst ist die aeussere Kette schon
+      // fertig, bevor hier ueberhaupt etwas passiert - und der .catch unten
+      // haengt an einer Kette, in der der eigentliche Teil gar nicht liegt.
+      return anfragen.then(function (ergebnisse) {
         if (lauf !== laeuft) return;               // eine neuere Anfrage läuft
         if (!ergebnisse.some(Boolean)) {
           // Profil bei BRouter weggeraeumt? Einmal neu hochladen, dann nochmal.
@@ -1517,7 +1523,7 @@
     var kennung = punkte.map(function (p) { return p[0].toFixed(4) + p[1].toFixed(4); }).join('|');
     if (spurSpeicher.kennung === kennung) return Promise.resolve(spurSpeicher.orte);
     var koords = punkte.map(function (p) { return p[1] + ',' + p[0]; }).join(';');
-    return fetch(OSRM + koords + '?steps=true&overview=false')
+    return hol(OSRM + koords + '?steps=true&overview=false', 20000)
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
         var orte = [];
@@ -1729,8 +1735,10 @@
 
         // Photon (Komoot) statt Nominatim: versteht Tippfehler und ist fuer
         // Vervollstaendigung gebaut. Nominatim bleibt Rueckfall.
-        fetch('https://photon.komoot.io/api/?q=' + encodeURIComponent(text) +
-              '&limit=6&lang=de' + nah)
+        // Kurzes Zeitlimit: haengt Photon, soll der Rueckfall auf Nominatim
+        // anspringen statt dass die Trefferliste stumm leer bleibt.
+        hol('https://photon.komoot.io/api/?q=' + encodeURIComponent(text) +
+            '&limit=6&lang=de' + nah, 8000)
           .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
           .then(function (d) {
             var treffer = (d.features || []).map(function (f) {
@@ -1746,8 +1754,8 @@
             zeigen(treffer);
           })
           .catch(function () {
-            fetch('https://nominatim.openstreetmap.org/search?format=json&limit=6&countrycodes=de,at,ch&q=' +
-                  encodeURIComponent(text))
+            hol('https://nominatim.openstreetmap.org/search?format=json&limit=6&countrycodes=de,at,ch&q=' +
+                encodeURIComponent(text), 8000)
               .then(function (r) { return r.json(); })
               .then(function (t) {
                 zeigen(t.map(function (o) {
