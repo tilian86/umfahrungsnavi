@@ -57,6 +57,15 @@
   var STADT_VMAX = 50;
   var STADT_BIS_KM = 15;
 
+  // Die drei Radvorschlaege. Alle drei sind Standardprofile auf brouter.de,
+  // es muss nichts hochgeladen werden. Reihenfolge egal - sortiert wird
+  // spaeter nach Fahrzeit.
+  var RAD_PROFILE = [
+    { profil: 'trekking', marke: 'Standard' },                // asphaltnah, gemuetlich
+    { profil: 'gravel', marke: 'Feldweg' },                   // befestigte Wirtschaftswege
+    { profil: 'fastbike-lowtraffic', marke: 'ruhig' }         // Asphalt, wenig Verkehr
+  ];
+
   // Vektorkarten statt Rasterbilder: MapLibre rendert selbst. Dadurch bleiben
   // Strassennamen auch bei gedrehter Karte aufrecht, die Fahransicht bekommt
   // echte Perspektive, und der Nachtstil ist ein richtiger Stil statt eines
@@ -281,6 +290,8 @@
                        paint: { 'raster-opacity': 0.8 } });
     }
 
+    radwegeEbenen();
+
     karte.addSource('routen', { type: 'geojson', data: leer() });
     karte.addSource('sperrzonen', { type: 'geojson', data: leer() });
 
@@ -306,6 +317,77 @@
     sperrenZeichnen();
   }
   function leer() { return { type: 'FeatureCollection', features: [] }; }
+
+  /* ------------------------------------------------------------ Radwegenetz
+   * Im Radmodus faerbt die Karte ein, was fuer das Rad zaehlt:
+   *   gruen  = ausgewiesener Radweg oder Weg mit Radfreigabe
+   *   ocker  = befestigter Feld-/Wirtschaftsweg (fahrbar, aber kein Radweg)
+   *   rot    = fuer Rad gesperrt (bicycle=no)
+   * Das Rot ist der eigentliche Zweck: es beantwortet auf einen Blick die
+   * Frage "warum nimmt er den Weg da nicht?" - naemlich weil er nicht darf.
+   * Beide Kartenstile liefern die Daten schon mit, es kostet keine Anfrage.
+   * Nur die Feldnamen unterscheiden sich (OpenMapTiles vs. Shortbread).
+   */
+  var RAD_EBENEN = ['rad-feldweg', 'rad-weg', 'rad-gesperrt'];
+  var BEFESTIGT = ['paved', 'asphalt', 'concrete', 'compacted',
+                   'fine_gravel', 'paving_stones', 'cobblestone', 'sett'];
+  var RAD_FREI = ['yes', 'designated', 'permissive', 'official'];
+
+  function radwegeEbenen() {
+    if (karte.getLayer('rad-weg')) return;
+    var s = radFelder();
+    if (!karte.getSource(s.quelle)) return;   // Stil ohne bekannte Strassendaten
+
+    function ebene(id, filter, farbe, breite, strich) {
+      var paint = { 'line-color': farbe, 'line-width': breite, 'line-opacity': .85 };
+      if (strich) paint['line-dasharray'] = strich;
+      karte.addLayer({
+        id: id, source: s.quelle, 'source-layer': s.ebene, type: 'line',
+        minzoom: 12, filter: filter,
+        layout: { 'line-cap': 'round', 'line-join': 'round', visibility: 'none' },
+        paint: paint
+      });
+    }
+
+    ebene('rad-feldweg', ['all', s.istFeldweg, s.befestigt], '#b8801f', 3, [2.5, 1.5]);
+    ebene('rad-weg', s.istRadweg, '#12a150', 3.5, null);
+    ebene('rad-gesperrt', ['==', ['get', s.rad], 'no'], '#d63a3a', 3, [1.4, 1.4]);
+
+    radwegeAnzeigen();
+  }
+
+  // Feldnamen der beiden Stile. Tag: OpenFreeMap/OpenMapTiles ("transportation",
+  // class/subclass). Nacht: VersaTiles/Shortbread ("streets", kind).
+  function radFelder() {
+    if (nacht) {
+      return {
+        quelle: 'versatiles-shortbread', ebene: 'streets', rad: 'bicycle',
+        istRadweg: ['any',
+          ['==', ['get', 'kind'], 'cycleway'],
+          ['all', ['match', ['get', 'kind'], ['path', 'footway', 'track'], true, false],
+                  ['match', ['get', 'bicycle'], RAD_FREI, true, false]]],
+        istFeldweg: ['==', ['get', 'kind'], 'track'],
+        befestigt: ['any', ['match', ['get', 'surface'], BEFESTIGT, true, false],
+                           ['match', ['get', 'tracktype'], ['grade1', 'grade2'], true, false]]
+      };
+    }
+    return {
+      quelle: 'openmaptiles', ebene: 'transportation', rad: 'bicycle',
+      istRadweg: ['any',
+        ['==', ['get', 'subclass'], 'cycleway'],
+        ['all', ['match', ['get', 'class'], ['path', 'track'], true, false],
+                ['match', ['get', 'bicycle'], RAD_FREI, true, false]]],
+      istFeldweg: ['==', ['get', 'class'], 'track'],
+      befestigt: ['match', ['get', 'surface'], BEFESTIGT, true, false]
+    };
+  }
+
+  function radwegeAnzeigen() {
+    var sicht = modus === 'rad' ? 'visible' : 'none';
+    RAD_EBENEN.forEach(function (id) {
+      if (karte && karte.getLayer(id)) karte.setLayoutProperty(id, 'visibility', sicht);
+    });
+  }
 
   // Kleines Menue am Druckpunkt: was soll dieser Ort werden? Ohne das hat
   // ein versehentlicher langer Druck das ganze Ziel ueberschrieben.
@@ -857,8 +939,25 @@
         { zusatz: '&alternativeidx=2', marke: '' },
         { zusatz: '&alternativeidx=0&profile:avoid_motorways=1', marke: '' }
       ];
-      if (nurHaupt) kandidaten = kandidaten.slice(0, 1);
-      else if (radfahrt) kandidaten = kandidaten.slice(0, 3);   // Autobahn-Variante sinnlos
+      // Beim Rad bringen BRouters Alternativen kaum Unterschied - sie rechnen
+      // ja mit demselben Profil und weichen nur ein paar Strassen aus. Der
+      // echte Unterschied steckt im Profil selbst: trekking bleibt auf
+      // Asphalt, gravel nimmt befestigte Feldwege (oft deutlich direkter),
+      // fastbike-lowtraffic meidet Verkehr. Drei Profile statt drei
+      // Alternativen - gleiche Zahl Anfragen, drei wirklich andere Wege.
+      if (radfahrt) {
+        kandidaten = RAD_PROFILE.map(function (p) {
+          return { zusatz: '&alternativeidx=0', marke: p.marke, profil: p.profil };
+        });
+        // Waehrend der Fahrt nur nachrechnen, was gerade gefahren wird -
+        // sonst springt die Fuehrung bei jeder Neuberechnung aufs Standard-
+        // profil zurueck und der eben gewaehlte Feldweg ist wieder weg.
+        if (nurHaupt) {
+          var wunsch = (variantenWunsch && variantenWunsch.marke) || '';
+          var treffer = kandidaten.filter(function (k) { return k.marke === wunsch; });
+          kandidaten = treffer.length ? treffer : kandidaten.slice(0, 1);
+        }
+      } else if (nurHaupt) kandidaten = kandidaten.slice(0, 1);
       if (!nurHaupt && !radfahrt && (stadtmodusGilt(punkte) || schleichErzwingen)) {
         kandidaten.push({
           zusatz: '&alternativeidx=0&profile:vmax=' + STADT_VMAX, marke: 'Schleichweg'
@@ -873,7 +972,7 @@
         (feldwegeFrei ? '&profile:feldwege_frei=1' : '') +
         (schotterOk ? '&profile:schotter_ok=1' : '');
       function hole(k) {
-        return fetch(BROUTER + '?lonlats=' + ll + '&profile=' + prof +
+        return fetch(BROUTER + '?lonlats=' + ll + '&profile=' + (k.profil || prof) +
                      '&format=geojson&timode=2' + k.zusatz + wege + nogos)
           .then(function (r) {
             if (!r.ok) {
@@ -1782,8 +1881,10 @@
       merken('modus', modus);
       if (modus === 'rad') { sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic'); }
       blitzerZeichnen();
+      radwegeAnzeigen();
+      variantenWunsch = null;      // Marken heissen im Auto- und Radmodus anders
       if (ziel) route();
-      info(modus === 'rad' ? 'Fahrradmodus – ohne Stau, Blitzer und Tempolimits'
+      info(modus === 'rad' ? 'Fahrradmodus – grün Radweg, ocker Feldweg, rot fürs Rad gesperrt'
                            : 'Automodus');
     };
 
