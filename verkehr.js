@@ -209,7 +209,9 @@
     var kopf = messages[0];
     var iLon = kopf.indexOf('Longitude'), iLat = kopf.indexOf('Latitude');
     var iT = kopf.indexOf('WayTags'), iD = kopf.indexOf('Distance');
-    if (iLon < 0 || iT < 0) return Promise.resolve([]);
+    // Alle vier Spalten pruefen: fehlt Latitude, liefe lat=NaN in die
+    // Nominatim-Abfragen und die Kennungen blieben still fuer immer leer.
+    if (iLon < 0 || iT < 0 || iLat < 0 || iD < 0) return Promise.resolve([]);
 
     // Zusammenhaengende Autobahnstuecke sammeln und je Stueck einen Punkt
     // in der Mitte nehmen - drei Abfragen reichen fuer jede Strecke.
@@ -442,7 +444,7 @@
           var orte = [];
           for (var j = 0; j < Math.min(lats.length, lons.length); j += 4) {
             var la = parseFloat(lats[j].textContent), lo = parseFloat(lons[j].textContent);
-            if (!isNaN(la)) orte.push([la, lo]);
+            if (!isNaN(la) && !isNaN(lo)) orte.push([la, lo]);
           }
           if (orte.length) raus.push({ text: text, orte: orte });
         }

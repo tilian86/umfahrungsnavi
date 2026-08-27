@@ -113,6 +113,18 @@
   var modus = 'auto';                    // 'auto' | 'rad'
   var feldwegeFrei = false, schotterOk = false;
 
+  // fetch mit Zeitlimit. Ohne das bleibt eine Anfrage bei stehender
+  // Mobilverbindung fuer immer offen, die Promise-Kette settled nie und die
+  // Statuszeile klebt auf "Berechne Route ...".
+  function hol(url, ms) {
+    if (!window.AbortController) return fetch(url);
+    var ab = new AbortController();
+    var uhr = setTimeout(function () { ab.abort(); }, ms || 15000);
+    return fetch(url, { signal: ab.signal })
+      .then(function (r) { clearTimeout(uhr); return r; },
+            function (e) { clearTimeout(uhr); throw e; });
+  }
+
   function $(id) { return document.getElementById(id); }
   var infoStand = 0;
   function info(t) { $('status').textContent = t; infoStand = Date.now(); }
@@ -929,7 +941,7 @@
 
     if (Date.now() < brouterPauseBis) return osrmRoute(punkte, lauf);
 
-    (radfahrt ? Promise.resolve('trekking') : profilBesorgen(false)).then(function (prof) {
+    var kette = (radfahrt ? Promise.resolve('trekking') : profilBesorgen(false)).then(function (prof) {
       // Mehrere Kandidaten, damit am Ende wirklich drei *verschiedene* übrig
       // bleiben. BRouters Alternativen ähneln sich oft; die Anfrage ohne
       // Autobahn bringt fast immer eine echte Alternative.
@@ -1022,7 +1034,7 @@
         var roh = [];
         ergebnisse.forEach(function (e) {
           var f = e && e.geo && e.geo.features && e.geo.features[0];
-          if (!f) return;
+          if (!f || !f.geometry || !f.geometry.coordinates) return;
           var pr = f.properties || {};
           roh.push({
             marke: e.marke,
@@ -1064,6 +1076,12 @@
         variantenWaehlen(variante);
         umgebungNachladen(varianten[0]);
       });
+    });
+    // Ohne diesen Fang klebt die Statuszeile bei einem Fehler irgendwo in der
+    // Kette fuer immer auf "Berechne Route ...".
+    if (kette && kette.catch) kette.catch(function () {
+      if (lauf !== laeuft) return;
+      info('Route konnte nicht berechnet werden – nochmal versuchen');
     });
   }
 
@@ -1185,8 +1203,8 @@
 
   function osrmEinzel(punkte) {
     var koords = punkte.map(function (p) { return p[1] + ',' + p[0]; }).join(';');
-    return fetch((modus === 'rad' ? OSRM_RAD : OSRM) + koords +
-                 '?overview=full&geometries=geojson&steps=true')
+    return hol((modus === 'rad' ? OSRM_RAD : OSRM) + koords +
+               '?overview=full&geometries=geojson&steps=true', 20000)
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) { return (d && d.routes && d.routes[0]) || null; })
       .catch(function () { return null; });
