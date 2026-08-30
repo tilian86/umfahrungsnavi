@@ -1,6 +1,8 @@
-# Umfahrungsnavi
+# Staufunk
 
-Auto-Navi für eine Person. Anders als die großen Navis darf es kompromisslos
+(Der Ordner heißt noch `umfahrungsnavi` — die Adresse hängt daran.)
+
+Auto- und Rad-Navi für eine Person. Anders als die großen Navis darf es kompromisslos
 umfahren — auch durch Wohngebiete.
 
 **Live:** https://tilian86.github.io/umfahrungsnavi/
