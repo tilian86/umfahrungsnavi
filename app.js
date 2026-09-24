@@ -24,10 +24,26 @@
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
 
-  // Umrechnung Zeitverlust -> Sperrgewicht. BRouter rechnet Gewichte grob in
-  // Metern Wegstrecke. 800 m je verlorener Minute heisst sinngemäß: "ein
-  // Umweg lohnt, solange er kürzer ist als das, was der Stau kostet."
-  var METER_JE_MINUTE = 800;
+  // Umrechnung Zeitverlust -> Sperrgewicht. Das Gewicht einer BRouter-Sperre
+  // sind Kosten JE METER im Kreis. Eine Minute Fahrt kostet im Mittel rund
+  // 1.960 Kosteneinheiten (gemessen Tuebingen -> Filderstadt: 44.149 fuer
+  // 22,5 min, die Umfahrung 17.760 mehr fuer 10,9 min mehr).
+  //   Gewicht = Stauminuten x 1.960 / (2 x Radius x ANRECHNUNG)
+  // ANRECHNUNG: BRouter rechnet nicht die ganze Strecke im Kreis an, sondern
+  // je Wegstueck zwischen zwei Kreuzungen nur den letzten Abschnitt im Kreis
+  // (Quelltext OsmPath/RoutingContext, nachgemessen 24.09.2026: B27 17-44 %,
+  // A8 63-72 %). Mit vollen 2 x Radius blieb ein 17-Minuten-Stau ungemieden,
+  // obwohl die Umfahrung nur 10,9 min mehr kostet. Gerechnet wird deshalb mit
+  // einem Viertel - lieber schlaegt BRouter eine Umfahrung zu viel vor: ob sie
+  // genommen wird, entscheidet danach der Zeitvergleich mit dem Weg durch den
+  // Stau (siehe route()).
+  // Frueher: 800 je Minute ohne Vergleich - jeder kleine Stau wurde umfahren,
+  // auch mit 20 Minuten Umweg.
+  var MINUTE_KOSTEN = 1960;
+  var ANRECHNUNG = 0.25;
+  // Von Hand gesetzte Sperren ("Stau hier", "Weiche aus"): da will der Fahrer
+  // nicht durch. Sie wiegen deshalb wie ein 30-Minuten-Stau.
+  var HAND_MINUTEN = 30;
 
   // Eingebauter TomTom-Schluessel als Voreinstellung. Bewusste Entscheidung:
   // Gratis-Schluessel ohne hinterlegte Zahlungsdaten - schlimmstenfalls
@@ -106,7 +122,9 @@
   var verkehrTimer = null, letzterVerkehr = 0, verkehrLaeuft = false;
   var schleichErzwingen = false;
   var alternativenGewuenscht = false;
-  var letzteStoerungsLage = null, letzteVerkehrsRoute = 0;
+  var letzteVerkehrsRoute = 0, bremsTimer = null, verkehrsAnlass = false;
+  var gerechneteNogos = null;            // Sperren, mit denen die Route gerechnet ist
+  var verkehrLuecke = '';                // Quellen, die zuletzt nichts geliefert haben
   var fahrmodus = false, drehung = 0, zoomStufe = 0, tempoKmh = 0;
   var kumWeg = [], limits = [], limitAktuell = null, limitGesagt = null;
   var verkehrKarteAn = true;
@@ -150,15 +168,36 @@
     }
     return ecken;
   }
-  function punktZuStrecke(p, a, b) {
-    // Grob in Metern; für "bin ich noch auf der Route" genau genug.
+  // Lot von p auf die Strecke a-b: Abstand in Metern und Anteil t (0 = a,
+  // 1 = b). Grob gerechnet; für "bin ich noch auf der Route" genau genug.
+  function lot(p, a, b) {
     var kx = 111320 * Math.cos(p[0] * Math.PI / 180), ky = 110540;
     var px = (p[1] - a[1]) * kx, py = (p[0] - a[0]) * ky;
     var bx = (b[1] - a[1]) * kx, by = (b[0] - a[0]) * ky;
     var l2 = bx * bx + by * by;
     var t = l2 ? Math.max(0, Math.min(1, (px * bx + py * by) / l2)) : 0;
     var dx = px - t * bx, dy = py - t * by;
-    return Math.sqrt(dx * dx + dy * dy);
+    return { d: Math.sqrt(dx * dx + dy * dy), t: t };
+  }
+  function punktZuStrecke(p, a, b) { return lot(p, a, b).d; }
+
+  // Wie viele Meter eines Linienzugs im Kreis um c liegen. (BRouter selbst
+  // rechnet davon nur einen Teil an, siehe MINUTE_KOSTEN.)
+  function streckeImKreis(koord, c, r) {
+    var kx = 111320 * Math.cos(c[0] * Math.PI / 180), ky = 110540, summe = 0;
+    for (var i = 1; i < koord.length; i++) {
+      var ax = (koord[i - 1][1] - c[1]) * kx, ay = (koord[i - 1][0] - c[0]) * ky;
+      var dx = (koord[i][1] - c[1]) * kx - ax, dy = (koord[i][0] - c[0]) * ky - ay;
+      var aa = dx * dx + dy * dy;
+      if (!aa) continue;
+      var bb = 2 * (ax * dx + ay * dy), cc = ax * ax + ay * ay - r * r;
+      var disk = bb * bb - 4 * aa * cc;
+      if (disk <= 0) continue;
+      var w = Math.sqrt(disk);
+      var t1 = Math.max(0, (-bb - w) / (2 * aa)), t2 = Math.min(1, (-bb + w) / (2 * aa));
+      if (t2 > t1) summe += (t2 - t1) * Math.sqrt(aa);
+    }
+    return summe;
   }
   function abstandZurRoute(ll) {
     if (!routePunkte.length) return 0;
@@ -178,6 +217,56 @@
       if (d < best) { best = d; k = i; }
     }
     return k;
+  }
+
+  // Wie weit bin ich auf der Route schon gekommen (Meter ab Routenanfang)?
+  // Lot auf den naechsten Abschnitt - gesucht zuerst rund um die letzte
+  // Position. Sonst springt die Zuordnung dort, wo die Route dicht an sich
+  // selbst vorbeifuehrt (Serpentinen, Rampen, Hin- und Rueckweg), und die
+  // Abbiegehinweise kaemen in falscher Reihenfolge.
+  // Dazu kostet jeder Meter Sprung entlang der Strecke 0,1 m Abstand: mit
+  // 15 m GPS-Streuung lag ein spaeterer Abschnitt sonst oft "naeher" - an
+  // einer Wende sprang der Fortschritt 400 m vor und der Banner uebersprang
+  // zwei Hinweise.
+  var lotIdx = -1, lotS = 0;
+  function lotAufStrecke(ll) {
+    var n = routePunkte.length;
+    if (n < 2 || kumWeg.length !== n) return null;
+    function suche(von, bis, stetig) {
+      var best = null;
+      for (var i = Math.max(1, von); i <= Math.min(n - 1, bis); i++) {
+        var l = lot(ll, routePunkte[i - 1], routePunkte[i]);
+        var s = kumWeg[i - 1] + l.t * (kumWeg[i] - kumWeg[i - 1]);
+        var wert = l.d + (stetig ? Math.abs(s - lotS) * 0.1 : 0);
+        if (!best || wert < best.wert) best = { wert: wert, d: l.d, i: i, s: s };
+      }
+      return best;
+    }
+    var treffer = null;
+    if (lotIdx > 0) {
+      var von = lotIdx, bis = lotIdx;
+      while (von > 1 && kumWeg[lotIdx] - kumWeg[von - 1] < 300) von--;
+      while (bis < n - 1 && kumWeg[bis] - kumWeg[lotIdx] < 3000) bis++;
+      treffer = suche(von, bis, true);
+      if (treffer && treffer.d > 60) treffer = null;
+    }
+    if (!treffer) {
+      // Neu einrasten (neue Route, lange Luecke): unter den fast gleich
+      // nahen Abschnitten der frueheste - nach einer Neuberechnung steht man
+      // am Anfang der Strecke, nicht auf ihrem Rueckweg.
+      var nah = suche(1, n - 1, false);
+      treffer = nah;
+      for (var i = 1; i < nah.i; i++) {
+        var l = lot(ll, routePunkte[i - 1], routePunkte[i]);
+        if (l.d <= nah.d + 20) {
+          treffer = { d: l.d, i: i, s: kumWeg[i - 1] + l.t * (kumWeg[i] - kumWeg[i - 1]) };
+          break;
+        }
+      }
+    }
+    lotIdx = treffer.i;
+    lotS = treffer.s;
+    return { s: treffer.s, d: treffer.d, idx: treffer.i };
   }
   function uhrzeit(minutenSpaeter) {
     var d = new Date(Date.now() + minutenSpaeter * 60000);
@@ -517,6 +606,7 @@
         blitzPruefen(ll);
         abweichungPruefen(ll);
         fahrdatenZeigen(ll);
+        durchfahrenPruefen(ll);
       }
       tempoEcke(ll);
     }, function (e) {
@@ -591,38 +681,73 @@
   // hindurchfuehrt (weil es nichts Besseres gibt oder die Schwelle nicht
   // erreicht ist). Der Betrag wird auf die Ankunftszeit aufgeschlagen -
   // BRouter selbst rechnet immer mit freier Fahrt.
-  function stauAufRoute() {
-    var min = 0;
-    sperren.forEach(function (sp) {
-      if (!sp.minuten || !routePunkte.length) return;
-      for (var i = 0; i < routePunkte.length; i += 2) {
-        if (abstand(sp.ort, routePunkte[i]) < sp.radius + 60) { min += sp.minuten; return; }
-      }
-    });
-    return Math.round(min);
+  // `ab`: erst ab diesem Routenpunkt zaehlen (was hinter einem liegt, ist
+  // schon durchfahren).
+  function stauAufRoute(ab) {
+    if (!routePunkte.length) return 0;
+    return Math.round(stauAuf(ab ? routePunkte.slice(ab) : routePunkte));
   }
 
-  // Aus dem gemeldeten Zeitverlust wird das Sperrgewicht. So verbiegt ein
-  // 20-Minuten-Stau die Route deutlich stärker als ein 6-Minuten-Stau, statt
-  // dass beide gleich behandelt werden.
-  function gewichtAus(minuten, hart) {
-    if (hart) return 0;                            // 0 = harte Sperre
-    return Math.round(Math.max(minuten, 1) * METER_JE_MINUTE);
+  // Minuten Stau auf einer Strecke: je Sperre anteilig nach den Metern, die
+  // die Strecke durch ihren Kreis faehrt - wer ihn ganz quert, bekommt die
+  // vollen Minuten. BRouter rechnet das Gewicht anders an (siehe
+  // MINUTE_KOSTEN) - die Wahl zwischen den Vorschlaegen trifft deshalb diese
+  // Rechnung, nicht BRouters Kosten. `fuerWahl`: Hand- und Vollsperren
+  // zaehlen dann so schwer, wie sie beim Routing wiegen (Vergleich der
+  // Vorschlaege), sonst wie gemeldet (Anzeige der Ankunftszeit).
+  function stauAuf(koord, fuerWahl) {
+    var summe = 0;
+    if (!koord || koord.length < 2) return 0;
+    sperren.forEach(function (sp) {
+      var min = fuerWahl ? wahlMinuten(sp) : sp.minuten;
+      if (!min) return;
+      var drin = streckeImKreis(koord, sp.ort, sp.radius);
+      if (drin > 0) summe += min * Math.min(1, drin / (2 * sp.radius));
+    });
+    return summe;
+  }
+  function wahlMinuten(sp) {
+    if (sp.hart) return Math.max(sp.minuten || 0, 60);
+    if (sp.quelle === 'hand') return Math.max(sp.minuten || 0, HAND_MINUTEN);
+    return sp.minuten || 0;
+  }
+  // Fahrzeit einer Variante MIT dem Stau, durch den sie fuehrt. BRouters
+  // eigene Zeit (`min`) rechnet immer mit freier Fahrt - nach ihr sortiert,
+  // saehe die Route mitten durch den Stau immer am schnellsten aus.
+  function zeit(v) {
+    if (v.malus == null) v.malus = stauAuf(v.koord, true);
+    return v.min + v.malus;
+  }
+
+  // Aus dem gemeldeten Zeitverlust wird das Sperrgewicht (Kosten je Meter im
+  // Kreis, siehe MINUTE_KOSTEN). Ein 20-Minuten-Stau verbiegt die Route
+  // deutlich staerker als ein 6-Minuten-Stau. Bei einer TomTom-Kette traegt
+  // jeder Kreis den GANZEN Stau: liegen mehrere Kreise auf einem Wegstueck
+  // ohne Kreuzung, rechnet BRouter davon nur einen an.
+  function gewichtAus(sp) {
+    if (sp.hart) return 0;                          // 0 = harte Sperre
+    var min = Math.max(wahlMinuten(sp), sp.gesamt || 0, 1);
+    // Nie 0 - ohne Gewicht wuerde BRouter die Zone hart sperren
+    return Math.max(1, Math.round(min * MINUTE_KOSTEN / (2 * sp.radius * ANRECHNUNG)));
   }
 
   function sperreHinzufuegen(s) {
-    sperren.push({
+    var sp = {
       ort: s.ort,
       radius: s.radius || 220,
-      gewicht: gewichtAus(s.minuten || 0, s.hart),
       hart: !!s.hart,
       minuten: s.minuten || 0,
+      gesamt: s.gesamtMinuten || s.minuten || 0,   // ganzer Stau (TomTom-Kette)
       text: s.text || 'Stau',
-      quelle: s.quelle || 'hand'
-    });
+      quelle: s.quelle || 'hand',
+      ref: s.ref || null,                 // Autobahn, fuers Nachmessen
+      bestaetigt: Date.now()              // zuletzt als Stau gemessen
+    };
+    sp.gewicht = gewichtAus(sp);
+    sperren.push(sp);
     sperrenZeichnen();
     stoerfahne();
-    return sperren[sperren.length - 1];
+    return sp;
   }
 
   function sperreEntfernen(s) {
@@ -676,9 +801,14 @@
 
   // BRouter erwartet lon,lat,radius[,gewicht], mehrere durch | getrennt.
   // Ohne Gewicht ist die Zone hart gesperrt, mit Gewicht nur teuer.
-  function nogoParameter() {
-    if (!sperren.length) return '';
-    return '&nogos=' + sperren.map(function (s) {
+  // `ohneStau`: nur Hand- und Vollsperren - fuer den Vergleichsweg, der
+  // einfach durch den Stau faehrt.
+  function nogoParameter(ohneStau) {
+    var liste = ohneStau
+      ? sperren.filter(function (s) { return s.quelle === 'hand' || s.hart; })
+      : sperren;
+    if (!liste.length) return '';
+    return '&nogos=' + liste.map(function (s) {
       return s.ort[1].toFixed(6) + ',' + s.ort[0].toFixed(6) + ',' + s.radius +
              (s.gewicht ? ',' + s.gewicht : '');
     }).join('|');
@@ -712,6 +842,48 @@
   }
 
   /* ------------------------------------------------------------------ Verkehr */
+  // Eine automatische Sperre haelt, solange ihr Stau bestaetigt wird. Faellt
+  // sie aus der Meldung, wird ihre EIGENE Stelle nachgemessen: erst wenn es
+  // dort wieder frei ist UND sie seit HALTEN nicht mehr bestaetigt wurde,
+  // faellt sie. Antwortet kein Dienst, haelt sie HALTEN_OHNE_DATEN.
+  // Frueher fiel sie, sobald die Umfahrung selbst frei gemessen war - also
+  // anderthalb Sekunden nach dem Umleiten -, und die Route kehrte mitten in
+  // den Stau zurueck.
+  var HALTEN = 10 * 60 * 1000;
+  var HALTEN_OHNE_DATEN = 30 * 60 * 1000;
+  // Mindestabstand verkehrsbedingter Neuberechnungen, in beide Richtungen
+  var BREMSE = 120000;
+
+  function istAuto(sp) { return sp.quelle !== 'hand'; }
+
+  // Sperre still streichen, weil sie hinter uns liegt - ohne Neuberechnung,
+  // fuer den Weg vor uns aendert sich nichts.
+  function sperreStreichen(sp) {
+    var i = sperren.indexOf(sp);
+    if (i < 0) return;
+    var aktuell = gerechneteNogos === nogoParameter();
+    sperren.splice(i, 1);
+    if (aktuell) gerechneteNogos = nogoParameter();
+    sperrenZeichnen();
+    stoerfahne();
+  }
+
+  // Durchfahrene Stoerungen fallen weg: war man einmal im Kreis, ist wieder
+  // draussen und fuehrt der Weg voraus nicht mehr hinein, liegt der Stau
+  // hinter einem. Die letzte Bedingung zaehlt bei den grossen Autobahn-
+  // Kreisen (900 m): eine Umfahrung streift sie oft nur am Rand.
+  function durchfahrenPruefen(ll) {
+    sperren.slice().forEach(function (sp) {
+      if (!istAuto(sp)) return;
+      var d = abstand(ll, sp.ort);
+      if (d < sp.radius) sp.drin = true;
+      else if (sp.drin && d > sp.radius + 150 &&
+               !streckeImKreis(routePunkte.slice(Math.max(0, lotIdx - 1)), sp.ort, sp.radius)) {
+        sperreStreichen(sp);
+      }
+    });
+  }
+
   function verkehrPruefen(stillschweigend) {
     if (modus === 'rad') return;         // Stau interessiert das Rad nicht
     if (!verkehrAn || !routePunkte.length || verkehrLaeuft) return;
@@ -719,10 +891,14 @@
     letzterVerkehr = Date.now();
     $('k-verkehr').classList.add('an');
     if (!stillschweigend) info('Prüfe Verkehrslage auf den nächsten Kilometern …');
+    function fertig() {
+      verkehrLaeuft = false;
+      $('k-verkehr').classList.remove('an');
+    }
 
     // Nur den Teil vor uns betrachten - hinter uns liegende Staus sind egal.
     var vorne = routePunkte.slice(standort ? routenIndex(standort) : 0);
-    if (vorne.length < 2) { verkehrLaeuft = false; return; }
+    if (vorne.length < 2) { fertig(); return; }
 
     // Vorausschau: bei langen Fahrten reichen 15 km (weiter vorn aendert sich
     // die Lage bis zum Eintreffen ohnehin). Bei kurzen Fahrten muss aber die
@@ -733,57 +909,107 @@
     restKm /= 1000;
     var sichtKm = restKm <= 25 ? restKm + 1 : 15;
 
+    var neu = [];
     window.Verkehr.alleStoerungen(vorne, routeRefs, tomtomKey, schwelle, sichtKm)
       .then(function (stoerungen) {
-        verkehrLaeuft = false;
-        $('k-verkehr').classList.remove('an');
+        var jetzt = Date.now();
+        verkehrLuecke = (stoerungen.ausfall || []).join(', ');
 
-        // Rueckkopplung verhindern: dieselbe Stoerungslage wie beim letzten
-        // Mal loest weder Ansage noch Neuberechnung aus. Sonst entsteht eine
-        // Schleife (route -> pruefen -> dieselben Stoerungen -> route ...),
-        // die alle paar Sekunden "2 Stoerungen, ich suche eine Umfahrung"
-        // durchsagt - genau so im echten Betrieb passiert.
-        var lage = stoerungen.map(function (st) {
-          return st.ort[0].toFixed(3) + ',' + st.ort[1].toFixed(3) + '|' + Math.round(st.minuten);
-        }).sort().join(';');
-        if (lage === letzteStoerungsLage) {
-          if (!stillschweigend) info(stoerungen.length
-            ? 'Verkehrslage unverändert – Umfahrung bleibt'
-            : 'Freie Fahrt – keine Störung ab ' + schwelle + ' min');
-          return;
-        }
-        letzteStoerungsLage = lage;
+        // 1. Gemeldetes mit den Sperren abgleichen: derselbe Stau bestaetigt
+        //    seine Sperre, ein neuer bekommt eine. 500 m Spielraum, weil die
+        //    TomTom-Messpunkte mit jeder Pruefung ein Stueck weiterwandern.
+        stoerungen.forEach(function (st) {
+          var alt = null;
+          sperren.forEach(function (sp) {
+            if (!alt && istAuto(sp) &&
+                abstand(sp.ort, st.ort) < Math.max(Math.max(sp.radius, st.radius || 0) * 1.2, 500)) alt = sp;
+          });
+          if (!alt) { neu.push(st); return; }
+          alt.bestaetigt = jetzt;
+          // Nur deutliche Aenderungen uebernehmen. Jede Messung schwankt ein
+          // wenig - wuerde jede das Gewicht verschieben, rechnete die Route
+          // alle drei Minuten neu und sagte jedes Mal wieder an.
+          var gesamt = st.gesamtMinuten || st.minuten;
+          if (!!st.hart !== alt.hart ||
+              Math.abs(st.minuten - alt.minuten) >= Math.max(2, alt.minuten * 0.25) ||
+              Math.abs(gesamt - alt.gesamt) >= Math.max(2, alt.gesamt * 0.25)) {
+            alt.minuten = st.minuten;
+            alt.gesamt = gesamt;
+            alt.hart = !!st.hart;
+            alt.text = st.text || alt.text;
+            alt.gewicht = gewichtAus(alt);
+          }
+        });
 
-        var vorher = sperren.filter(function (s) { return s.quelle !== 'hand'; }).length;
-        sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic');
-        stoerungen.forEach(sperreHinzufuegen);
-
-        if (!stoerungen.length) {
-          if (!stillschweigend) {
+        // 2. Nicht gemeldete Sperren an ihrer eigenen Stelle nachmessen. Die
+        //    Pruefung lief nur entlang der Route - und die fuehrt bei einer
+        //    Umfahrung gerade NICHT durch den Stau. Weit hinter uns: weg.
+        var offen = [];
+        sperren.slice().forEach(function (sp) {
+          if (!istAuto(sp) || sp.bestaetigt === jetzt) return;
+          if (standort && abstand(standort, sp.ort) > 25000) sperreStreichen(sp);
+          else offen.push(sp);
+        });
+        return window.Verkehr.nachmessen(offen, tomtomKey).then(function (befunde) {
+          offen.forEach(function (sp, k) {
+            if (befunde[k] === 'stau') { sp.bestaetigt = jetzt; return; }
+            var frist = befunde[k] === 'frei' ? HALTEN : HALTEN_OHNE_DATEN;
+            if (jetzt - sp.bestaetigt < frist) return;       // haelt noch
+            var j = sperren.indexOf(sp);
+            if (j >= 0) sperren.splice(j, 1);
+          });
+          neu.forEach(sperreHinzufuegen);
+          sperrenZeichnen();
+          stoerfahne();
+          return stoerungen;
+        });
+      })
+      .then(function (stoerungen) {
+        fertig();
+        var autos = sperren.filter(istAuto).length;
+        if (!stillschweigend && !neu.length) {
+          if (!stoerungen.length && verkehrLuecke) {
+            info('Verkehrsdaten gerade nicht verfügbar (' + verkehrLuecke + ')');
+          } else if (autos) {
+            info('Verkehrslage unverändert – Umfahrung bleibt');
+          } else {
             info(tomtomKey ? 'Freie Fahrt – keine Störung ab ' + schwelle + ' min'
                            : 'Keine Autobahn-Störung. Für Staus auf Land- und '
                              + 'Stadtstraßen fehlt der TomTom-Schlüssel.');
           }
-          if (vorher) route();                    // Stau hat sich aufgelöst
-          return;
         }
-        var min = Math.round(stoerungen.reduce(function (a, s) { return a + s.minuten; }, 0));
-        if (sprache) { letzterText = ''; sagen(
-          stoerungen.length === 1
+        if (neu.length && sprache) {
+          var min = Math.round(neu.reduce(function (a, s) { return a + s.minuten; }, 0));
+          letzterText = '';
+          sagen(neu.length === 1
             ? 'Stau voraus, ' + min + ' Minuten. Ich suche eine Umfahrung.'
-            : stoerungen.length + ' Störungen voraus, zusammen ' + min +
-              ' Minuten. Ich suche eine Umfahrung.'); }
-        // Mindestens zwei Minuten zwischen verkehrsbedingten Neuberechnungen -
-        // sonst schaukeln sich wechselnde Meldungen zu einem Flackern auf.
-        if (Date.now() - letzteVerkehrsRoute < 120000) return;
-        letzteVerkehrsRoute = Date.now();
-        route();
+            : neu.length + ' Störungen voraus, zusammen ' + min +
+              ' Minuten. Ich suche eine Umfahrung.');
+        }
+        // Neu, geaendert, aufgeloest - oder eine frueher gebremste Rechnung,
+        // die noch aussteht: das erledigt die gebremste Neuberechnung.
+        verkehrsNeuberechnung();
       })
       .catch(function () {
-        verkehrLaeuft = false;
-        $('k-verkehr').classList.remove('an');
+        fertig();
         info('Verkehrsdienst antwortet nicht');
       });
+  }
+
+  // Verkehrsbedingt neu rechnen - hoechstens alle zwei Minuten, und zwar in
+  // BEIDE Richtungen (Stau kommt, Stau geht). Was in die Sperrfrist faellt,
+  // wird nachgeholt statt verworfen: frueher blieb es einfach liegen, dann
+  // standen die Sperren in der Liste, die Route fuehrte aber weiter mitten
+  // durch den Stau.
+  function verkehrsNeuberechnung() {
+    clearTimeout(bremsTimer);
+    bremsTimer = null;
+    if (!ziel || !standort || nogoParameter() === gerechneteNogos) return;
+    var warten = letzteVerkehrsRoute + BREMSE - Date.now();
+    if (warten > 0) { bremsTimer = setTimeout(verkehrsNeuberechnung, warten); return; }
+    letzteVerkehrsRoute = Date.now();
+    verkehrsAnlass = true;
+    route();
   }
 
   function verkehrTaktStarten() {
@@ -892,6 +1118,8 @@
     $('suche').value = (name || '').split(',')[0];
     $('suche-loeschen').hidden = false;
     if (name && name !== 'Kartenpunkt') zielMerken(name.split(',')[0], lat, lon);
+    // Neues Ziel, neue Lage: Staus der alten Strecke nicht mitschleppen
+    sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic');
     fahrmodusAnwenden();
     route();
   }
@@ -911,6 +1139,8 @@
     routenZeichnen();
     blitzerZeichnen();
     sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic');
+    clearTimeout(bremsTimer); bremsTimer = null;
+    gerechneteNogos = null; verkehrLuecke = '';
     $('varianten').hidden = true;
     $('banner').hidden = true;
     $('blitzfahne').hidden = true;
@@ -932,6 +1162,9 @@
     var nogos = nogoParameter();
 
     var radfahrt = modus === 'rad';
+    var ohneStau = radfahrt ? nogos : nogoParameter(true);
+    var ausVerkehr = verkehrsAnlass;       // wegen Stau neu gerechnet?
+    verkehrsAnlass = false;
 
     // Waehrend der Fahrt (Abweichung, Stauwechsel) braucht es KEINE
     // Auswahl - nur den besten Weg. Das spart drei Viertel der Anfragen und
@@ -981,6 +1214,12 @@
           zusatz: '&alternativeidx=1&profile:vmax=' + STADT_VMAX, marke: 'Schleichweg'
         });
       }
+      // Vergleichsweg: einfach durch den Stau. Ein Umweg wird nur genommen,
+      // wenn er schneller ist als dieser Weg SAMT Stauminuten. BRouters
+      // Kosten sind keine Minuten - darauf allein ist kein Verlass.
+      if (ohneStau !== nogos) {
+        kandidaten.push({ zusatz: '&alternativeidx=0', marke: '', nogos: ohneStau });
+      }
       // Wege-Schalter nur im Auto-Modus - das trekking-Profil kennt die
       // Parameter nicht und BRouter bricht bei unbekannten Namen ab
       var wege = radfahrt ? '' :
@@ -988,7 +1227,8 @@
         (schotterOk ? '&profile:schotter_ok=1' : '');
       function hole(k) {
         return hol(BROUTER + '?lonlats=' + ll + '&profile=' + (k.profil || prof) +
-                   '&format=geojson&timode=2' + k.zusatz + wege + nogos, 20000)
+                   '&format=geojson&timode=2' + k.zusatz + wege +
+                   (k.nogos != null ? k.nogos : nogos), 20000)
           .then(function (r) {
             if (!r.ok) {
               // 403 ist BRouters eigene Drosselung ("Please, retry later!").
@@ -1061,6 +1301,10 @@
         ersatzfahne(false);
         var luft = abstand(punkte[0], punkte[punkte.length - 1]) / 1000;
         varianten = auswaehlen(verschiedene(roh), luft);
+        // Waehrend der Fahrt nur der beste Weg - der Vergleichsweg durch den
+        // Stau war nur zum Abwaegen da.
+        if (nurHaupt) varianten = varianten.slice(0, 1);
+        gerechneteNogos = nogos;
 
         // Zur zuletzt selbst gewaehlten Art zurueckfinden: erst gleiche Marke
         // (Schleichweg bleibt Schleichweg), sonst aehnliche Laenge.
@@ -1080,7 +1324,15 @@
           if (treffer >= 0) variante = treffer;
         }
         variantenWaehlen(variante);
-        umgebungNachladen(varianten[0]);
+        // Fuehrt der gewaehlte Weg trotz Stau weiter hindurch, weil jeder
+        // Umweg laenger dauert, das auch sagen - sonst wartet man nach
+        // "Ich suche eine Umfahrung" vergeblich auf eine.
+        if (ausVerkehr && stauAufRoute() >= schwelle) {
+          letzterText = '';
+          sagen('Umfahrung lohnt sich nicht, ich bleibe auf der Strecke.');
+        }
+        // Kennungen und Blitzer fuer den Weg, der wirklich gefahren wird
+        umgebungNachladen(varianten[variante]);
       });
     });
     // Ohne diesen Fang klebt die Statuszeile bei einem Fehler irgendwo in der
@@ -1101,7 +1353,7 @@
   function plausibel(liste, luftlinieKm) {
     if (!liste.length) return liste;
     var beste = liste[0];
-    liste.forEach(function (v) { if (v.min < beste.min) beste = v; });
+    liste.forEach(function (v) { if (zeit(v) < zeit(beste)) beste = v; });
     // Die schnellste Route bleibt immer drin, auch wenn sie selbst eine
     // Schleife enthaelt - ohne Route waere die App unbrauchbar.
     var raus = liste.filter(function (v) {
@@ -1110,7 +1362,7 @@
       // Der Schleichweg darf laenger dauern - er wird ja gerade gewaehlt,
       // WEIL die schnelle Strecke steht. Sein eigener Deckel steckt in
       // auswaehlen(). Unsinnig weit darf er trotzdem nicht sein.
-      if (v.marke !== 'Schleichweg' && v.min > beste.min * 1.8) return false;
+      if (v.marke !== 'Schleichweg' && zeit(v) > zeit(beste) * 1.8) return false;
       if (v.km > beste.km * 2.2) return false;                // absurd weit
       if (luftlinieKm > 0.5 && v.km > luftlinieKm * 4) return false;
       return true;
@@ -1133,14 +1385,14 @@
 
   function auswaehlen(liste, luftlinieKm) {
     liste = plausibel(liste, luftlinieKm);
-    var schnellste = liste[0] ? liste[0].min : 0;
+    var schnellste = liste[0] ? zeit(liste[0]) : 0;
     var grenze = schleichErzwingen ? 2.5 : 1.6;
     schleichErzwingen = false;
     // Einen Schleichweg, der fast doppelt so lange dauert, will niemand -
     // das passiert auf Strecken mit viel Schnellstrasse, wo das gedeckelte
     // Rechentempo die ganze Route ausbremst statt nur den Stau zu umgehen.
     liste = liste.filter(function (v) {
-      return v.marke !== 'Schleichweg' || !schnellste || v.min <= schnellste * grenze;
+      return v.marke !== 'Schleichweg' || !schnellste || zeit(v) <= schnellste * grenze;
     });
     var raus = liste.slice(0, 3);
     if (raus.some(function (v) { return v.marke; })) return raus;
@@ -1266,26 +1518,50 @@
         varianten = plausibel(verschiedene(roh), luft).slice(0, 3);
         if (!varianten.length) varianten = roh.slice(0, 1);
         variante = 0;
+        gerechneteNogos = nogoParameter();
         variantenWaehlen(0);
         ersatzfahne(true, brouterGrund);
-        umgebungNachladen(varianten[0]);
+        umgebungNachladen(varianten[variante]);
       })
       .catch(function () { info('Routendienst nicht erreichbar'); });
   }
 
   function osrmHinweise(v) {
+    var ab = 0;
     return v.osrmSteps.map(function (st) {
       var man = st.maneuver || {};
       if (man.type === 'depart' || man.type === 'arrive') return null;
       var ort = [man.location[1], man.location[0]];
+      // Platz auf der Strecke - die Schritte kommen der Reihe nach, also
+      // nur vorwaerts suchen (sonst landet ein Hinweis bei einer Schleife
+      // auf dem falschen Durchgang)
+      var idx = punktAb(v.koord, ort, ab); ab = idx;
       if (man.type === 'roundabout' || man.type === 'rotary') {
-        return { ort: ort, winkel: 0, kreis: true,
+        return { ort: ort, idx: idx, winkel: 0, kreis: true,
                  text: 'im Kreisverkehr die ' + (ZAHLWORT[man.exit] || (man.exit || 1) + '.') + ' Ausfahrt' };
       }
       var w = OSRM_WINKEL[man.modifier];
+      var seite = /left/.test(man.modifier || '') ? 'links' : /right/.test(man.modifier || '') ? 'rechts' : '';
+      // Ausfahrten und Gabelungen sind flach - "leicht rechts" oder gar
+      // nichts waere dort falsch. Wie bei BRouter: "rechts halten – Ausfahrt".
+      if ((man.type === 'off ramp' || man.type === 'fork') && seite && Math.abs(w || 0) <= 45) {
+        return { ort: ort, idx: idx, kreis: false,
+                 winkel: (seite === 'links' ? -1 : 1) * Math.max(Math.abs(w || 0), 20),
+                 text: seite + ' halten' + (man.type === 'off ramp' ? ' – Ausfahrt' : '') };
+      }
       if (w === undefined || w === 0) return null;
-      return { ort: ort, winkel: w, kreis: false, text: winkelText(w) };
+      return { ort: ort, idx: idx, winkel: w, kreis: false, text: winkelText(w) };
     }).filter(Boolean);
+  }
+  // Index des Routenpunkts zu einem Ort, gesucht ab einem Startindex
+  function punktAb(koord, ort, ab) {
+    var best = ab, bd = Infinity;
+    for (var i = ab; i < koord.length; i++) {
+      var d = abstand(ort, koord[i]);
+      if (d < bd) { bd = d; best = i; }
+      if (d < 3) break;                   // genau getroffen
+    }
+    return best;
   }
 
   /* Aussortieren, was praktisch dieselbe Strecke ist. Ein Vergleich über
@@ -1299,7 +1575,8 @@
    * wirklich dieselbe Strecke - bei 80 % wären auch die beiden echten
    * Alternativen verschwunden, und es blieb nur ein Vorschlag übrig. */
   function verschiedene(liste) {
-    liste.sort(function (a, b) { return a.min - b.min; });
+    // Nach Fahrzeit samt Stau - siehe zeit()
+    liste.sort(function (a, b) { return zeit(a) - zeit(b); });
     var raus = [];
     liste.forEach(function (v) {
       v.raster = rasterMenge(v.koord);
@@ -1354,7 +1631,7 @@
     if (varianten.length < 2) { leiste.hidden = true; leiste.innerHTML = ''; return; }
     leiste.hidden = false;
     leiste.innerHTML = '';
-    var schnellste = varianten.reduce(function (a, c) { return c.min < a.min ? c : a; });
+    var schnellste = varianten.reduce(function (a, c) { return zeit(c) < zeit(a) ? c : a; });
     var kuerzeste = varianten.reduce(function (a, c) { return c.km < a.km ? c : a; });
     varianten.forEach(function (v, i) {
       var b = document.createElement('button');
@@ -1365,13 +1642,19 @@
       var zusatz = modus === 'rad'
         ? '<br><span class="klein">' + (v.auf || 0) + ' m ↑</span>'
         : '<br><span class="klein">' + (v.art.wohn / 1000).toFixed(1) + ' km klein</span>';
+      // Fahrzeit samt Stau auf diesem Weg - sonst wirkt der Weg mitten durch
+      // den Stau auf der Kachel schneller als die Umfahrung
+      var dauer = Math.round(v.min + stauAuf(v.koord));
       b.innerHTML = (etikett ? '<b>' + etikett + '</b><br>' : '') +
-                    v.min + ' min<br>' + uhrzeit(v.min) + '<br>' +
+                    dauer + ' min<br>' + uhrzeit(dauer) + '<br>' +
                     v.km.toFixed(1) + ' km' + zusatz;
       if (i === variante) b.className = 'gewaehlt';
       b.onclick = function () {
         variantenWunsch = { marke: v.marke || '', km: v.km };
         variantenWaehlen(i);
+        // Andere Strecke, andere Autobahnen: Kennungen neu ermitteln, sonst
+        // kaemen die Staumeldungen weiter von der alten Strecke
+        umgebungNachladen(v);
       };
       leiste.appendChild(b);
     });
@@ -1392,6 +1675,7 @@
     limits = limitsAus(v.messages);
     limitAktuell = null; limitGesagt = null;
     abseitsZaehler = 0;
+    lotIdx = -1;                          // neue Strecke, Fortschritt neu suchen
     // Schon Angesagtes nicht wiederholen: die neuen Hinweise erben die
     // "gesagt"-Marken der alten, wenn sie am selben Ort liegen. Ohne das
     // wiederholt jede Neuberechnung die gerade laufende Ansage ("in 20 Metern
@@ -1399,6 +1683,11 @@
     var alteHinweise = hinweise, altesGesagt = gesagt;
     gesagt = {};
     hinweise = hinweiseBauen(v);
+    // Wo auf der Strecke liegt jeder Hinweis (Meter ab Start)? Daran misst
+    // der Banner den Weg bis zur Abbiegung - nicht an der Luftlinie.
+    hinweise.forEach(function (h) {
+      h.s = h.idx != null ? kumWeg[Math.min(h.idx, kumWeg.length - 1)] : null;
+    });
     hinweise.forEach(function (h, i) {
       for (var j = 0; j < alteHinweise.length; j++) {
         if (abstand(h.ort, alteHinweise[j].ort) < 30) {
@@ -1436,8 +1725,12 @@
     });
     // Kurz warten: direkt davor lief die Adresssuche ueber denselben Dienst,
     // und Nominatim drosselt bei zwei Anfragen in derselben Sekunde.
+    // Die Kennungen gehoeren zur gewaehlten Strecke. Ist inzwischen eine
+    // andere gewaehlt (Kachel, Neuberechnung), gilt diese Antwort nicht mehr.
     setTimeout(function () {
+      if (routePunkte !== v.koord) return;
       window.Verkehr.refsErmitteln(v.messages || null, routePunkte).then(function (refs) {
+        if (routePunkte !== v.koord) return;
         routeRefs = refs;
         if (verkehrAn) verkehrPruefen(true);
       });
@@ -1450,15 +1743,20 @@
   // steht - Meldungen wie "Stau voraus" sollen erst gelesen werden koennen.
   function fahrdatenZeigen(ll) {
     if (!kumWeg.length || Date.now() - infoStand < 5000) return;
-    var idx = routenIndex(ll);
-    var rest = kumWeg[kumWeg.length - 1] - kumWeg[idx];
+    var pos = lotAufStrecke(ll);
+    if (!pos) return;
+    var gesamt = kumWeg[kumWeg.length - 1];
+    var rest = gesamt - pos.s;
     var v = varianten[variante];
     if (!v || rest < 30) return;
-    var restMin = v.min * rest / Math.max(kumWeg[kumWeg.length - 1], 1);
-    var stau = stauAufRoute();
+    var restMin = v.min * rest / Math.max(gesamt, 1);
+    // Nur der Stau, der noch vor einem liegt - durchfahrener kostet nichts mehr
+    var stau = stauAufRoute(Math.max(0, pos.idx - 1));
     $('status').textContent = '→ ' + (zielName || 'Ziel').split(',')[0] +
       ' · an ' + uhrzeit(restMin + stau) + ' · ' + Math.round(restMin + stau) + ' min' +
-      (stau ? ' (+' + stau + ' Stau)' : '') + ' · ' + (rest / 1000).toFixed(1) + ' km';
+      (stau ? ' (+' + stau + ' Stau)' : '') + ' · ' + (rest / 1000).toFixed(1) + ' km' +
+      // Ohne Verkehrsdaten ist "kein Stau" keine Aussage - dazusagen
+      (verkehrLuecke ? ' · ⚠ Verkehrsdaten fehlen' : '');
   }
 
   /* ---------------------------------------------------- Tempolimit-Schild */
@@ -1592,6 +1890,47 @@
     return 'scharf ' + seite;
   }
 
+  // Welche Seite ein BRouter-Befehl meint. Gebraucht, wo der Winkel zu flach
+  // ist, um die Richtung zu tragen: Ausfahrten und Gabelungen liegen oft
+  // unter 25 Grad (gemessen: B27-Ausfahrt mit 12 Grad).
+  var SEITE = { 2: 'links', 3: 'links', 4: 'links', 8: 'links', 17: 'links',
+                5: 'rechts', 6: 'rechts', 7: 'rechts', 9: 'rechts', 18: 'rechts' };
+
+  // Strassenart je Abschnitt aus BRouters messages: jede Zeile beschreibt
+  // das Stueck BIS zu ihrem Punkt. Die Punkte stehen dort als Ganzzahl mit
+  // sechs Nachkommastellen - genau wie in der Geometrie, also exakt
+  // vergleichbar. Ergebnis: [{ idx: Endpunkt, hw: highway-Wert }] in
+  // Fahrtrichtung.
+  function strassenArten(v) {
+    var m = v.messages;
+    if (!m || m.length < 2) return null;
+    var kopf = m[0];
+    var iLon = kopf.indexOf('Longitude'), iLat = kopf.indexOf('Latitude');
+    var iT = kopf.indexOf('WayTags');
+    if (iLon < 0 || iLat < 0 || iT < 0) return null;
+    var raus = [], j = 0, n = v.koord.length;
+    for (var r = 1; r < m.length; r++) {
+      var lon = parseInt(m[r][iLon], 10), lat = parseInt(m[r][iLat], 10);
+      var k = j;
+      while (k < n && (Math.round(v.koord[k][1] * 1e6) !== lon ||
+                       Math.round(v.koord[k][0] * 1e6) !== lat)) k++;
+      if (k >= n) continue;               // nicht gefunden - Zeile auslassen
+      raus.push({ idx: k, hw: (/highway=(\S+)/.exec(m[r][iT] || '') || [])[1] || '' });
+      j = k + 1;
+    }
+    return raus.length ? raus : null;
+  }
+  // Strassenart des Abschnitts, der am Routenpunkt `bis` endet
+  function wegBis(arten, bis) {
+    for (var r = 0; r < arten.length; r++) if (arten[r].idx >= bis) return arten[r].hw;
+    return '';
+  }
+  // Ausfahrt = von Autobahn oder Kraftfahrstrasse auf eine Rampe (*_link)
+  function istAusfahrt(arten, k) {
+    return !!arten && /^(motorway|trunk)$/.test(wegBis(arten, k)) &&
+           /_link$/.test(wegBis(arten, k + 1));
+  }
+
   function hinweiseBauen(v) {
     if (v.osrmSteps) {
       var l = osrmHinweise(v);
@@ -1601,19 +1940,35 @@
       });
       return l;
     }
+    var arten = strassenArten(v);
     var liste = v.hinweise.map(function (h) {
       var k = Math.min(h[0], v.koord.length - 1);
-      var kreis = KREISVERKEHR[h[1]];
-      var text = kreis && h[2]
-        ? 'im Kreisverkehr die ' + (ZAHLWORT[h[2]] || h[2] + '.') + ' Ausfahrt'
-        : winkelText(h[4]);
-      return { ort: v.koord[k], winkel: kreis ? 0 : h[4], text: text, kreis: !!kreis };
-    }).filter(function (h) {
-      // BRouter meldet auch Punkte, an denen man einfach weiterfährt.
-      // "In 400 Metern geradeaus" hilft niemandem und verdeckt den nächsten
-      // echten Hinweis.
-      return h.text !== 'geradeaus';
-    });
+      var befehl = h[1], w = h[4] || 0;
+      // Befehl 1 heisst "weiterfahren". "In 400 Metern geradeaus" hilft
+      // niemandem und verdeckt den naechsten echten Hinweis.
+      if (befehl === 1) return null;
+      var kreis = KREISVERKEHR[befehl];
+      if (kreis) {
+        var kt = h[2] ? 'im Kreisverkehr die ' + (ZAHLWORT[h[2]] || h[2] + '.') + ' Ausfahrt'
+                      : winkelText(w);
+        return kt === 'geradeaus' ? null : { ort: v.koord[k], idx: k, winkel: 0, text: kt, kreis: true };
+      }
+      var seite = SEITE[befehl] || (w < 0 ? 'links' : 'rechts');
+      var text = winkelText(w);
+      if ((befehl === 17 || befehl === 18 || istAusfahrt(arten, k)) && Math.abs(w) < 60) {
+        // Frueher fiel die Ausfahrt unter 25 Grad als "geradeaus" weg - und
+        // der Banner zeigte bis dahin die Abbiegung danach
+        text = seite + ' halten – Ausfahrt';
+      } else if (text === 'geradeaus') {
+        // Flache Gabelung: BRouter kennt die Seite, der Winkel ist zu klein
+        // fuer "leicht rechts". Ohne Seite bleibt es still.
+        if (!SEITE[befehl]) return null;
+        text = seite + ' halten';
+      }
+      // Pfeil fuer "halten" leicht schraeg, damit er nicht wie geradeaus aussieht
+      if (/halten/.test(text)) w = (seite === 'links' ? -1 : 1) * Math.max(Math.abs(w), 20);
+      return { ort: v.koord[k], idx: k, winkel: w, text: text, kreis: false };
+    }).filter(Boolean);
 
     // Zwei Abbiegungen dicht hintereinander zusammenfassen - im Auto braucht
     // man beide auf einmal, sonst kommt die zweite zu spät.
@@ -1628,11 +1983,27 @@
     var banner = $('banner');
     if (!hinweise.length || !ziel) { banner.hidden = true; return; }
 
+    // Entfernung zum naechsten Hinweis ENTLANG der Strecke. Die Luftlinie
+    // taeuscht in Kurven, Rampen und Schleifen: dort war ein spaeterer
+    // Hinweis schon "nah", der Banner zeigte das Falsche und "Jetzt rechts
+    // abbiegen" kam bei Tempo 160 ueber 500 m zu frueh.
     var beste = null, besteD = Infinity;
-    for (var i = 0; i < hinweise.length; i++) {
-      if (gesagt['weg' + i]) continue;
-      var d = abstand(ll, hinweise[i].ort);
-      if (d < besteD) { besteD = d; beste = i; }
+    var pos = lotAufStrecke(ll);
+    if (pos && pos.d < 150) {
+      for (var i = 0; i < hinweise.length; i++) {
+        if (gesagt['weg' + i] || hinweise[i].s == null) continue;
+        var rest = hinweise[i].s - pos.s;
+        if (rest < -10) continue;         // schon vorbei
+        if (rest < besteD) { besteD = rest; beste = i; }
+      }
+      if (beste !== null) besteD = Math.max(0, besteD);
+    } else {
+      // Abseits der Strecke: Luftlinie, bis die Neuberechnung da ist
+      for (var j = 0; j < hinweise.length; j++) {
+        if (gesagt['weg' + j]) continue;
+        var d = abstand(ll, hinweise[j].ort);
+        if (d < besteD) { besteD = d; beste = j; }
+      }
     }
 
     var zumZiel = abstand(ll, ziel);
@@ -1678,7 +2049,8 @@
     } else leiste.hidden = true;
 
     // Zweimal ansagen: mit Vorlauf zum Einordnen, und kurz davor.
-    var anhang = (h.einordnen ? ', ' + h.einordnen : '') +
+    // Bei "halten" steckt die Seite schon in der Ansage
+    var anhang = (h.einordnen && !/halten/.test(h.text) ? ', ' + h.einordnen : '') +
                  (h.danach ? ', dann ' + h.danach : '');
     if (besteD < Math.max(modus === 'rad' ? 110 : 250, tempoKmh * 4.5) && !gesagt['ton' + beste]) {
       gesagt['ton' + beste] = true;
@@ -2013,8 +2385,20 @@
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'visible' && !sperre) holen();
     });
+    // iOS gibt die Sprachausgabe erst frei, wenn ein speak() direkt aus
+    // einer Beruehrung kommt (touchend zaehlt, pointerdown nicht). Sonst
+    // bleibt das Navi nach dem Start stumm - die erste Ansage kommt ja aus
+    // dem GPS, nicht aus einem Tippen. Also beim ersten Tippen einmal leer
+    // sprechen.
+    var stimmeFrei = false;
     ['pointerdown', 'touchend'].forEach(function (t) {
-      document.addEventListener(t, function () { if (!sperre) holen(); }, { passive: true });
+      document.addEventListener(t, function () {
+        if (!sperre) holen();
+        if (t === 'touchend' && !stimmeFrei && 'speechSynthesis' in window) {
+          stimmeFrei = true;
+          try { window.speechSynthesis.speak(new SpeechSynthesisUtterance('')); } catch (e) {}
+        }
+      }, { passive: true });
     });
   }
 

@@ -77,7 +77,7 @@ damit die Entscheidung pro Route bewusst fällt statt unbemerkt.
 | Routing | **BRouter**, öffentlicher Dienst, Profil `car-fast` | frei |
 | Sperrzonen | BRouter-Parameter `nogos` | frei |
 | Verkehr Autobahn | **Autobahn GmbH des Bundes** (INRIX) | frei, ohne Schlüssel |
-| Verkehr sonst | **TomTom Flow Segment Data** | 2.500 Abrufe/Monat frei |
+| Verkehr sonst | **TomTom Flow Segment Data** | 20.000 Abrufe/Monat frei |
 | Adresssuche | Nominatim | frei |
 
 **Warum BRouter und nicht OSRM/GraphHopper:** BRouter läuft als öffentlicher
@@ -86,9 +86,11 @@ Gewicht — und seine Profile sind bearbeitbare Textdateien, die sich sogar auf
 den öffentlichen Server hochladen lassen. Ein eigener Server lohnt erst, wenn
 BRouter an Grenzen stößt.
 
-**Zum TomTom-Freikontingent:** 2.500 Abrufe pro **Monat** (nicht pro Tag — das
-stand in der ersten Fassung falsch). Bei einer Abfrage alle zwei Minuten sind
-das rund 80 Stunden Navigation im Monat. Für eine Person reicht das, aber es
+**Zum TomTom-Freikontingent:** Flow Segment Data hat laut Preisseite
+(Stand 09/2026) 20.000 Abrufe pro **Monat** frei — die 2.500 gelten für die
+Incidents-API. Eine Prüfung alle drei Minuten fragt mehrere Punkte entlang der
+Route ab, gemessen rund 7 Abrufe je Fahrminute: gut 45 Stunden Navigation im
+Monat. Für eine Person reicht das, aber es
 ist kein Puffer für Spielereien: die Abfrage gehört an die Route gekoppelt und
 nicht an einen festen Takt. Die Verkehrs-Kacheln zum bloßen *Anzeigen* haben
 ein eigenes, viel größeres Kontingent (200.000/Monat).
@@ -180,8 +182,10 @@ Spurhinweise, Aufzeichnung gefahrener Strecken.
 ## 8. Entschieden
 
 1. **Wie aggressiv?** Umfahren ab 5 Minuten Zeitverlust; einstellbar von 3 bis
-   15. Das Sperrgewicht wächst mit dem gemeldeten Verlust (800 m je Minute),
-   damit ein dicker Stau die Route stärker verbiegt als ein kleiner.
+   15. Das Sperrgewicht wächst mit dem gemeldeten Verlust (seit v30 auf
+   BRouters Kosten geeicht, siehe README), damit ein dicker Stau die Route
+   stärker verbiegt als ein kleiner. Genommen wird ein Umweg nur, wenn er
+   schneller ist als der Weg durch den Stau.
 2. **„Anlieger frei"** bleibt erlaubt — so verhält sich `car-fast` von Haus
    aus. Die App weist den Anteil je Variante aus.
 3. **BRouter reicht.** Sperrzonen, Alternativrouten, Abbiegehinweise,
@@ -211,7 +215,8 @@ Alles gegen `https://brouter.de` gemessen, Strecke Tübingen (9.0576, 48.5216)
   (`highway`, `maxspeed`, `access`) — daraus rechnet die App den Wohnstraßen-
   und Anlieger-Anteil. ✅
 - TomTom-Freikontingent laut `docs.tomtom.com/pricing`: Traffic Incidents API
-  2.500/Monat, Verkehrs-Kacheln 200.000/Monat, ohne Kreditkarte.
+  2.500/Monat, Flow Segment Data 20.000/Monat, Verkehrs-Kacheln
+  200.000/Monat, ohne Kreditkarte.
 
 ---
 

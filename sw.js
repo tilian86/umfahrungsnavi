@@ -4,11 +4,11 @@
  * werden, sonst mischt GitHub Pages alte und neue Staende. Sie gehoert
  * zusammen mit den ?v=-Marken in index.html angefasst.
  */
-var VERSION = 'un-v29';
+var VERSION = 'un-v30';
 var GERUEST = [
-  './', './index.html', './app.js?v=29', './stil.css?v=29',
-  './verkehr.js?v=29', './pruefstand.js?v=29', './profil/umfahrung.brf',
-  './vendor/maplibre/maplibre-gl.js?v=29', './vendor/maplibre/maplibre-gl.css?v=29',
+  './', './index.html', './app.js?v=30', './stil.css?v=30',
+  './verkehr.js?v=30', './pruefstand.js?v=30', './profil/umfahrung.brf',
+  './vendor/maplibre/maplibre-gl.js?v=30', './vendor/maplibre/maplibre-gl.css?v=30',
   './manifest.json', './icons/Icon-192.png'
 ];
 
@@ -28,18 +28,42 @@ self.addEventListener('activate', function (e) {
   }).then(function () { return self.clients.claim(); }));
 });
 
+// So lange darf das Netz fuer eine eigene Datei brauchen, dann kommt sie aus
+// dem Cache. Ohne Frist hing der Start bei schlechtem Empfang (Funkloch,
+// Tiefgarage, ueberlastete Zelle), bis der Abruf aufgab - auf dem iPhone
+// bis zu einer Minute weisser Bildschirm.
+var FRIST = 3000;
+
 self.addEventListener('fetch', function (e) {
   var u = new URL(e.request.url);
   // Alles Fremde (Kacheln, BRouter, Nominatim) laeuft am Cache vorbei.
   if (u.origin !== self.location.origin) return;
   if (e.request.method !== 'GET') return;
   // Netz zuerst, Cache als Rueckfall: so ist ein neuer Stand sofort da,
-  // und ohne Empfang startet die App trotzdem.
-  e.respondWith(
-    fetch(e.request).then(function (r) {
+  // und ohne (oder mit zaehem) Empfang startet die App trotzdem.
+  var gemerkt = Promise.resolve();
+  var netz = fetch(e.request).then(function (r) {
+    // Nur Gutes merken - eine Fehlerseite soll den Stand im Cache nicht
+    // ueberschreiben
+    if (r.ok) {
       var kopie = r.clone();
-      caches.open(VERSION).then(function (c) { c.put(e.request, kopie); });
-      return r;
-    }).catch(function () { return caches.match(e.request); })
-  );
+      gemerkt = caches.open(VERSION).then(function (c) { return c.put(e.request, kopie); });
+    }
+    return r;
+  });
+  // Kommt der Cache zuerst, laeuft der Netzabruf trotzdem zu Ende und
+  // frischt den Cache fuer den naechsten Start auf
+  e.waitUntil(netz.then(function () { return gemerkt; }).catch(function () {}));
+  e.respondWith(new Promise(function (fertig) {
+    var erledigt = false;
+    function geben(r) { if (!erledigt && r) { erledigt = true; fertig(r); } }
+    var uhr = setTimeout(function () { caches.match(e.request).then(geben); }, FRIST);
+    netz.then(function (r) { clearTimeout(uhr); geben(r); }, function () {
+      clearTimeout(uhr);
+      caches.match(e.request).then(function (r) {
+        if (r) geben(r);
+        else if (!erledigt) { erledigt = true; fertig(Response.error()); }
+      });
+    });
+  }));
 });

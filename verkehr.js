@@ -42,6 +42,29 @@
   var STADT_RADIUS = 200;
   var TOMTOM   = 'https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json';
 
+  // Markiert "Dienst hat nicht geantwortet". Das ist etwas anderes als
+  // "keine Stoerung" - ein Ausfall darf nie als freie Fahrt durchgehen.
+  var FEHLT = { fehlt: true };
+
+  // fetch mit Zeitlimit, und zwar fuer Kopf UND Inhalt. Ohne das bleibt eine
+  // Anfrage bei stehender Mobilverbindung ewig offen: die Verkehrspruefung
+  // kommt nie zurueck, und weil sie als "laeuft noch" gilt, wird auch nie
+  // wieder geprueft. Liefert den gelesenen Inhalt ('json' oder 'text');
+  // eine Fehlantwort wird zum Fehler mit `status`, damit sich 400 (dort gibt
+  // es keine Daten) von 429 (Kontingent aus) unterscheiden laesst.
+  function abruf(url, ms, art, opt) {
+    var ab = window.AbortController ? new AbortController() : null;
+    var uhr = ab ? setTimeout(function () { ab.abort(); }, ms) : null;
+    var o = {};
+    for (var k in (opt || {})) o[k] = opt[k];
+    if (ab) o.signal = ab.signal;
+    return fetch(url, o).then(function (r) {
+      if (!r.ok) { var f = new Error('HTTP ' + r.status); f.status = r.status; throw f; }
+      return art === 'text' ? r.text() : r.json();
+    }).then(function (d) { clearTimeout(uhr); return d; },
+            function (e) { clearTimeout(uhr); throw e; });
+  }
+
   /* ------------------------------------------------------------ Geometrie */
   function abstand(a, b) {
     var R = 6371000, t = Math.PI / 180;
@@ -99,8 +122,8 @@
     });
     var box = (minLat - 0.01) + ',' + (minLon - 0.01) + ',' +
               (maxLat + 0.01) + ',' + (maxLon + 0.01);
-    return fetch('https://cdn2.atudo.net/api/4.0/pois.php?type=1,2,3,4,5,6,20,21,22,23,24,25,26&box=' + box)
-      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    return abruf('https://cdn2.atudo.net/api/4.0/pois.php?type=1,2,3,4,5,6,20,21,22,23,24,25,26&box=' + box,
+                 10000, 'json')
       .then(function (d) {
         return (d.pois || []).filter(function (x) { return x.type !== 'cluster'; })
           .map(function (x) {
@@ -164,13 +187,11 @@
     var i = 0;
     function next() {
       if (i >= server.length) return Promise.reject(new Error('alle Spiegel aus'));
-      return fetch(server[i++], {
+      // 25 s: die Abfrage selbst darf serverseitig bis 30 s rechnen
+      return abruf(server[i++], 25000, 'json', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'data=' + encodeURIComponent(q)
-      }).then(function (r) {
-        if (!r.ok) throw new Error(r.status);
-        return r.json();
       }).catch(next);
     }
     return next();
@@ -247,12 +268,8 @@
       }
       var s = stuecke[i2++];
       var p = s.punkte[Math.floor(s.punkte.length / 2)];
-      return fetch('https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=17&lat=' +
-                   p[0].toFixed(5) + '&lon=' + p[1].toFixed(5))
-        .then(function (r) {
-          if (!r.ok) throw new Error(r.status);
-          return r.json();
-        })
+      return abruf('https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=17&lat=' +
+                   p[0].toFixed(5) + '&lon=' + p[1].toFixed(5), 8000, 'json')
         .then(function (d) {
           var name = d && (d.name || (d.address || {}).road || '');
           // OSM schreibt "A 8", die Autobahn-Schnittstelle "A8"
@@ -283,23 +300,29 @@
     UNSPECIFIED_ABNORMAL_TRAFFIC: 3
   };
 
+  // Alle Warnungen einer Autobahn - oder FEHLT, wenn der Dienst schweigt.
+  function warnungenHolen(ref) {
+    return abruf(AUTOBAHN + encodeURIComponent(ref) + '/services/warning', 10000, 'json')
+      .then(function (d) { return (d && d.warning) || []; })
+      .catch(function () { return FEHLT; });
+  }
+  function warnungsOrt(w) {
+    var c = w.coordinate;
+    var ort = c ? [parseFloat(c.lat), parseFloat(c.long)] : null;
+    return ort && !isNaN(ort[0]) && !isNaN(ort[1]) ? ort : null;
+  }
+
   function autobahnStoerungen(refs, route, schwelle) {
     if (!refs || !refs.length) return Promise.resolve([]);
-    var anfragen = refs.slice(0, 4).map(function (ref) {
-      return fetch(AUTOBAHN + encodeURIComponent(ref) + '/services/warning')
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (d) { return (d && d.warning) || []; })
-        .catch(function () { return []; });
-    });
+    var gefragt = refs.slice(0, 4);
 
-    return Promise.all(anfragen).then(function (listen) {
-      var raus = [];
-      listen.forEach(function (warnungen) {
+    return Promise.all(gefragt.map(warnungenHolen)).then(function (listen) {
+      var raus = [], fehlt = 0;
+      listen.forEach(function (warnungen, k) {
+        if (warnungen === FEHLT) { fehlt++; return; }
         warnungen.forEach(function (w) {
-          var c = w.coordinate;
-          if (!c) return;
-          var ort = [parseFloat(c.lat), parseFloat(c.long)];
-          if (isNaN(ort[0])) return;
+          var ort = warnungsOrt(w);
+          if (!ort) return;
 
           var lage = anDerRoute(ort, route);
           if (lage.abstand > 2000) return;             // nicht auf unserer Strecke
@@ -334,10 +357,12 @@
             text: (gesperrt ? 'Sperrung' : ART[w.abnormalTrafficType] || 'Stau') + ' ' +
                   (w.title || '').split('|')[0].trim() +
                   (minuten ? ' · ' + minuten + ' min' : ''),
+            ref: gefragt[k],              // fuers Nachmessen an Ort und Stelle
             quelle: 'autobahn'
           });
         });
       });
+      raus.ausfall = fehlt > 0;
       return raus;
     });
   }
@@ -346,6 +371,25 @@
   // Misst je Stuetzstelle die gefahrene gegen die freie Geschwindigkeit.
   // Zusammenhaengende langsame Stuecke werden zu einer Stoerung gebuendelt,
   // damit nicht jeder Messpunkt eine eigene Sperrzone wird.
+  // Eine Messung an einem Punkt: {ort, jetzt, frei, sicher}. null, wenn
+  // TomTom dort keine Strasse kennt (HTTP 400) - FEHLT, wenn der Dienst
+  // nicht antwortet oder das Kontingent aus ist (403, 429).
+  function tomtomPunkt(p, schluessel) {
+    return abruf(TOMTOM + '?key=' + encodeURIComponent(schluessel) +
+                 '&unit=KMPH&point=' + p[0].toFixed(5) + ',' + p[1].toFixed(5), 8000, 'json')
+      .then(function (d) {
+        var f = d && d.flowSegmentData;
+        if (!f || !f.freeFlowSpeed) return null;
+        return { ort: p, jetzt: f.currentSpeed, frei: f.freeFlowSpeed,
+                 sicher: f.confidence == null ? 1 : f.confidence };
+      })
+      .catch(function (e) { return e && e.status === 400 ? null : FEHLT; });
+  }
+  // Ab wann ein Messpunkt als Stau zaehlt
+  function stockt(m) {
+    return !!m && m !== FEHLT && m.sicher >= 0.5 && m.jetzt < m.frei * 0.65;
+  }
+
   function tomtomFluss(route, schluessel, schwelle, maxKm) {
     if (!schluessel || !route || route.length < 2) return Promise.resolve([]);
 
@@ -361,24 +405,13 @@
     var stuetzen = ausduennen(abschnitt, 800);
     if (stuetzen.length > 30) stuetzen = ausduennen(abschnitt, 1500);
 
-    var anfragen = stuetzen.map(function (p) {
-      return fetch(TOMTOM + '?key=' + encodeURIComponent(schluessel) +
-                   '&unit=KMPH&point=' + p[0].toFixed(5) + ',' + p[1].toFixed(5))
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (d) {
-          var f = d && d.flowSegmentData;
-          if (!f || !f.freeFlowSpeed) return null;
-          return { ort: p, jetzt: f.currentSpeed, frei: f.freeFlowSpeed,
-                   sicher: f.confidence == null ? 1 : f.confidence };
-        })
-        .catch(function () { return null; });
-    });
+    var anfragen = stuetzen.map(function (p) { return tomtomPunkt(p, schluessel); });
 
     return Promise.all(anfragen).then(function (messungen) {
-      var raus = [], lauf = null;
+      var raus = [], lauf = null, fehlt = 0;
       messungen.forEach(function (m, i) {
-        var stockt = m && m.sicher >= 0.5 && m.jetzt < m.frei * 0.65;
-        if (stockt) {
+        if (m === FEHLT) fehlt++;
+        if (stockt(m)) {
           // Zeitverlust auf dem Stueck bis zur naechsten Stuetzstelle
           var strecke = i + 1 < stuetzen.length ? abstand(stuetzen[i], stuetzen[i + 1]) : 800;
           var verlust = strecke / 1000 * (60 / Math.max(m.jetzt, 3) - 60 / m.frei);  // Minuten
@@ -414,8 +447,11 @@
           });
         });
       });
+      // Fehlt mehr als die Haelfte der Messungen, ist das keine Lage mehr,
+      // sondern eine Luecke (meist Kontingent aus oder kein Netz)
+      stoerungen.ausfall = fehlt * 2 > messungen.length;
       return stoerungen;
-    }).catch(function () { return []; });
+    }).catch(function () { var leer = []; leer.ausfall = true; return leer; });
   }
 
   /* --------------------- 1b. Landesmeldestelle BW: Sperrungen & Unfaelle */
@@ -425,12 +461,11 @@
   // keine Rush-Hour-Staus. Die Datei ist 1,3 MB gross, deshalb hoechstens
   // alle zehn Minuten frisch.
   var TIC = 'https://api.mobidata-bw.de/datasets/traffic/incidents-bw/TIC3-Meldungen.xml';
-  var ticSpeicher = { stand: 0, meldungen: [] };
+  var ticSpeicher = { stand: 0, meldungen: [], ausfall: false };
 
   function ticLaden() {
     if (Date.now() - ticSpeicher.stand < 600000) return Promise.resolve(ticSpeicher.meldungen);
-    return fetch(TIC)
-      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+    return abruf(TIC, 30000, 'text')
       .then(function (xml) {
         var dom = new DOMParser().parseFromString(xml, 'text/xml');
         var raus = [];
@@ -448,10 +483,21 @@
           }
           if (orte.length) raus.push({ text: text, orte: orte });
         }
-        ticSpeicher = { stand: Date.now(), meldungen: raus };
+        ticSpeicher = { stand: Date.now(), meldungen: raus, ausfall: false };
         return raus;
       })
-      .catch(function () { return ticSpeicher.meldungen; });
+      .catch(function () {
+        // Den letzten Stand noch eine halbe Stunde weiterverwenden - danach
+        // ist er keine Lage mehr, sondern eine Luecke.
+        ticSpeicher.ausfall = Date.now() - ticSpeicher.stand > 1800000;
+        return ticSpeicher.meldungen;
+      });
+  }
+  // Steht zu diesem Ort noch eine Meldung in der Liste?
+  function ticMeldungBei(meldungen, ort) {
+    return meldungen.some(function (m) {
+      return m.orte.some(function (o) { return abstand(o, ort) < 300; });
+    });
   }
 
   function ticStoerungen(route, schwelle) {
@@ -480,6 +526,7 @@
           quelle: 'tic'
         });
       });
+      raus.ausfall = ticSpeicher.ausfall;
       return raus;
     });
   }
@@ -494,15 +541,57 @@
       var alle = teile[0].concat(teile[1], teile[2]);
       // Doppelte aussortieren: melden Autobahn-API und TomTom denselben Stau,
       // gewinnt die amtliche Meldung, weil sie die Minuten sauberer kennt.
-      // Doppelte aussortieren: melden Autobahn-API und TomTom denselben Stau,
-      // gewinnt die amtliche Meldung. Der Mindestabstand richtet sich nach der
-      // Sperrgroesse - enge Stadtsperren duerfen dicht in einer Kette liegen.
-      return alle.filter(function (s, i) {
+      // Der Mindestabstand richtet sich nach der Sperrgroesse - enge
+      // Stadtsperren duerfen dicht in einer Kette liegen.
+      var raus = alle.filter(function (s, i) {
         return !alle.some(function (t, j) {
           return j < i && abstand(s.ort, t.ort) < Math.max(s.radius, t.radius) * 1.2;
         });
       });
+      // Welche Quelle diesmal nichts geliefert hat. Ohne diese Angabe sieht
+      // ein Ausfall genauso aus wie freie Fahrt.
+      raus.ausfall = [];
+      if (teile[0].ausfall) raus.ausfall.push('Autobahn');
+      if (teile[1].ausfall) raus.ausfall.push('TomTom');
+      if (teile[2].ausfall) raus.ausfall.push('Landesmeldungen');
+      return raus;
     });
+  }
+
+  /* ------------------------------------------------- Nachmessen vor Ort */
+  // Eine Umfahrung fuehrt am Stau vorbei - die Pruefung entlang der neuen
+  // Route sieht ihn also nicht mehr. Das heisst aber nicht, dass er weg ist.
+  // Deshalb wird jede Sperre an ihrer EIGENEN Stelle nachgeprueft, bei der
+  // Quelle, die sie gemeldet hat. Ergebnis je Sperre: 'stau', 'frei' oder
+  // 'unbekannt' (Dienst schweigt - dann entscheidet die Haltezeit in app.js).
+  function nachmessen(liste, schluessel) {
+    return Promise.all(liste.map(function (sp) {
+      if (sp.quelle === 'tomtom') {
+        if (!schluessel) return 'unbekannt';
+        return tomtomPunkt(sp.ort, schluessel).then(function (m) {
+          if (!m || m === FEHLT) return 'unbekannt';
+          return stockt(m) ? 'stau' : 'frei';
+        });
+      }
+      if (sp.quelle === 'autobahn') {
+        if (!sp.ref) return 'unbekannt';
+        return warnungenHolen(sp.ref).then(function (warnungen) {
+          if (warnungen === FEHLT) return 'unbekannt';
+          var noch = warnungen.some(function (w) {
+            var ort = warnungsOrt(w);
+            return ort && abstand(ort, sp.ort) < Math.max(sp.radius, 1000);
+          });
+          return noch ? 'stau' : 'frei';
+        });
+      }
+      if (sp.quelle === 'tic') {
+        return ticLaden().then(function (meldungen) {
+          if (ticSpeicher.ausfall) return 'unbekannt';
+          return ticMeldungBei(meldungen, sp.ort) ? 'stau' : 'frei';
+        });
+      }
+      return 'unbekannt';
+    }));
   }
 
   window.Verkehr = {
@@ -512,6 +601,7 @@
     ticStoerungen: ticStoerungen,
     tomtomFluss: tomtomFluss,
     alleStoerungen: alleStoerungen,
+    nachmessen: nachmessen,
     abstand: abstand,
     peilung: peilung,
     winkelDiff: winkelDiff
