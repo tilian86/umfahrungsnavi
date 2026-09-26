@@ -105,6 +105,7 @@
   var routePunkte = [], routeRefs = [], blitzer = [];
   var sperren = [];                      // {ort,radius,gewicht,hart,text,quelle,kreis}
   var folgen = true, sprache = false, nacht = false;
+  var musikWeiter = true;                // Ansage ueber die Musik, siehe tonSitzung()
   var blitzWarnen = true, verkehrAn = true, stoppmodus = false, staumodus = false;
   var schwelle = 5;                      // Minuten Zeitverlust
   var stadtmodus = 'auto';               // 'auto' | 'an' | 'aus'
@@ -2080,9 +2081,24 @@
     } else abseitsZaehler = 0;
   }
 
+  // Ton ueber der Musik. Ohne Angabe nimmt iOS fuer die Ansage eine
+  // Wiedergabe-Sitzung, die andere Apps UNTERBRICHT: Spotify pausiert und
+  // kommt danach nicht von selbst wieder. 'ambient' (Audio Session API,
+  // Safari ab 16.4) mischt stattdessen - die Musik laeuft weiter, die Stimme
+  // liegt darueber. Preis: der Stumm-Schalter am iPhone schaltet dann auch
+  // die Ansagen stumm. 'auto' ist das alte Verhalten (Schalter unter Mehr).
+  // Gesetzt beim Start, beim Umschalten und vor JEDER Ausgabe - iOS soll die
+  // Sitzung nie mit einer anderen Art anlegen.
+  function tonSitzung() {
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = musikWeiter ? 'ambient' : 'auto';
+    } catch (e) {}
+  }
+
   function sagen(t) {
     if (!sprache || !('speechSynthesis' in window) || t === letzterText) return;
     letzterText = t;
+    tonSitzung();
     var u = new SpeechSynthesisUtterance(t);
     u.lang = 'de-DE'; u.rate = 1.05;
     window.speechSynthesis.speak(u);
@@ -2271,6 +2287,14 @@
       if (!blitzWarnen) $('blitzfahne').hidden = true;
     };
 
+    $('s-musik').onclick = function () {
+      musikWeiter = !musikWeiter;
+      $('s-musik').textContent = musikWeiter ? 'an' : 'aus';
+      schalter('s-musik', musikWeiter);
+      merken('musik', musikWeiter ? '1' : '0');
+      tonSitzung();
+    };
+
     $('s-modus').onclick = function () {
       modus = modus === 'auto' ? 'rad' : 'auto';
       $('s-modus').textContent = modus === 'auto' ? '🚗 Auto' : '🚲 Rad';
@@ -2396,6 +2420,7 @@
         if (!sperre) holen();
         if (t === 'touchend' && !stimmeFrei && 'speechSynthesis' in window) {
           stimmeFrei = true;
+          tonSitzung();     // auch die Freigabe darf Spotify nicht anhalten
           try { window.speechSynthesis.speak(new SpeechSynthesisUtterance('')); } catch (e) {}
         }
       }, { passive: true });
@@ -2412,6 +2437,10 @@
     feldwegeFrei = geholt('feldwege', '0') === '1';
     schotterOk   = geholt('schotter', '0') === '1';
     sprache     = geholt('sprache', '0') === '1';
+    musikWeiter = geholt('musik', '1') === '1';
+    // Vor jeder moeglichen Ausgabe - die erste Ansage darf Spotify schon
+    // nicht anhalten
+    tonSitzung();
     schwelle    = parseInt(geholt('schwelle', '5'), 10) || 5;
     stadtmodus  = geholt('stadt', 'auto');
     tomtomKey   = geholt('tomtom', '');
@@ -2437,7 +2466,12 @@
     schalter('k-sprache', sprache);
     schalter('s-nacht', nacht);   $('s-nacht').textContent   = nacht ? 'an' : 'aus';
     schalter('s-blitzer', blitzWarnen); $('s-blitzer').textContent = blitzWarnen ? 'an' : 'aus';
-    schalter('s-verkehr', verkehrAn);   $('s-verkehr').textContent = verkehrAn ? 'an' : 'aus';
+    schalter('s-musik', musikWeiter);   $('s-musik').textContent = musikWeiter ? 'an' : 'aus';
+    // Aeltere iPhones (vor iOS 16.4) kennen die Audio Session API nicht -
+    // dort wirkt der Schalter nicht, und das soll man auch sehen
+    if (!navigator.audioSession) $('s-musik-hinweis').textContent =
+      'Dieses Gerät unterstützt das nicht (erst ab iOS 16.4) – der Schalter wirkt hier nicht.';
+    schalter('s-verkehr', verkehrAn);  $('s-verkehr').textContent = verkehrAn ? 'an' : 'aus';
     schalter('s-verkehrkarte', verkehrKarteAn); $('s-verkehrkarte').textContent = verkehrKarteAn ? 'an' : 'aus';
     $('s-modus').textContent = modus === 'auto' ? '🚗 Auto' : '🚲 Rad';
     schalter('s-feldwege', feldwegeFrei); $('s-feldwege').textContent = feldwegeFrei ? 'an' : 'aus';
