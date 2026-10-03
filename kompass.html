@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1220">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Kompass">
+<link rel="apple-touch-icon" href="icons/Icon-192.png">
+<title>Kompass-Check</title>
+<!--
+  Kompass-Check — zeigt, wie genau der iPhone-Kompass gerade ist, und ob die
+  Halterung im Auto ihn verdreht.
+
+  Anlass (03.10.2026): Beim Losfahren mit dem Navi geht es regelmäßig in die
+  falsche Richtung. Im Stand kennt das Navi die Fahrtrichtung nur aus dem
+  Kompass, und Magnet-/MagSafe-Halter lenken den stark ab. Die eingebaute
+  Kompass-App zeigt keine Genauigkeit — Safari liefert sie aber
+  (webkitCompassAccuracy, ± Grad; −1 = nicht kalibriert).
+-->
+<style>
+  :root {
+    --bg: #0b1220; --karte: #151e30; --linie: rgba(255,255,255,.08);
+    --ink: #e8eef7; --leise: #8a97ab; --gut: #34c759; --mittel: #ffcc00; --schlecht: #ff453a;
+    --akzent: #5ac8fa;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-text-size-adjust: 100%; }
+  main { max-width: 460px; margin: 0 auto;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  h1 { font-size: 22px; margin: 4px 0 2px; }
+  .unter { color: var(--leise); font-size: 13.5px; margin: 0 0 14px; }
+  .karte { background: var(--karte); border: 1px solid var(--linie); border-radius: 16px;
+    padding: 14px 16px; margin-bottom: 12px; }
+  .karte h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--leise); margin: 0 0 8px; }
+  button { font: inherit; font-weight: 600; color: var(--ink); background: #22304a;
+    border: 1px solid rgba(255,255,255,.12); border-radius: 12px; padding: 12px 14px;
+    width: 100%; cursor: pointer; }
+  button:active { transform: scale(.98); }
+  button.haupt { background: var(--akzent); color: #04121d; border: 0; font-size: 17px; padding: 15px; }
+  button:disabled { opacity: .45; }
+
+  /* Rose */
+  .rose-wrap { display: grid; place-items: center; margin: 4px 0 6px; position: relative; }
+  svg.rose { width: 230px; height: 230px; display: block; }
+  #drehteil { transition: transform .12s linear; transform-origin: 115px 115px; }
+  .grad { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+  .grad b { font-size: 46px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .grad i { display: block; font-style: normal; text-align: center; color: var(--leise); font-size: 15px; margin-top: -6px; }
+
+  /* Genauigkeit */
+  .genau { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .genau b { font-size: 30px; font-variant-numeric: tabular-nums; }
+  .genau span { font-weight: 600; }
+  .gut { color: var(--gut); } .mittel { color: var(--mittel); } .schlecht { color: var(--schlecht); }
+  .klein { font-size: 13.5px; color: var(--leise); margin: 6px 0 0; }
+  .zeile { display: flex; justify-content: space-between; gap: 10px; font-size: 14px;
+    padding: 6px 0; border-top: 1px solid var(--linie); }
+  .zeile:first-of-type { border-top: 0; }
+  .zeile em { font-style: normal; color: var(--leise); }
+
+  /* Halterungs-Test */
+  ol.schritte { margin: 0; padding: 0; list-style: none; display: grid; gap: 12px; }
+  ol.schritte li p { margin: 0 0 8px; font-size: 14px; }
+  ol.schritte li p b { color: var(--ink); }
+  .ergebnis { font-size: 14px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .fazit { margin-top: 12px; padding: 12px; border-radius: 12px; background: rgba(90,200,250,.08);
+    border: 1px solid rgba(90,200,250,.2); font-size: 14.5px; }
+  .fazit:empty { display: none; }
+  .fehler { color: var(--schlecht); font-size: 14px; }
+  a { color: var(--akzent); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🧭 Kompass-Check</h1>
+  <p class="unter">Wie genau ist dein Kompass — und verdreht ihn die Halterung im Auto?</p>
+
+  <div class="karte" id="startkarte">
+    <button class="haupt" id="start">Kompass starten</button>
+    <p class="klein">Das iPhone fragt einmal nach „Bewegung &amp; Ausrichtung“ — bitte erlauben.</p>
+    <p class="fehler" id="fehler" hidden></p>
+  </div>
+
+  <div id="anzeige" hidden>
+    <div class="karte">
+      <div class="rose-wrap">
+        <svg class="rose" viewBox="0 0 230 230" aria-hidden="true">
+          <!-- fester Zeiger: dahin zeigt die Oberkante des Handys -->
+          <path d="M115 6 L123 22 L107 22 Z" fill="#5ac8fa"/>
+          <g id="drehteil">
+            <circle cx="115" cy="115" r="92" fill="none" stroke="rgba(255,255,255,.14)" stroke-width="2"/>
+            <g id="striche"></g>
+            <text x="115" y="44" text-anchor="middle" fill="#ff453a" font-size="18" font-weight="700">N</text>
+            <text x="190" y="121" text-anchor="middle" fill="#8a97ab" font-size="15" font-weight="600">O</text>
+            <text x="115" y="198" text-anchor="middle" fill="#8a97ab" font-size="15" font-weight="600">S</text>
+            <text x="40"  y="121" text-anchor="middle" fill="#8a97ab" font-size="15" font-weight="600">W</text>
+          </g>
+        </svg>
+        <div class="grad"><div><b id="grad">–</b><i id="richtung">&nbsp;</i></div></div>
+      </div>
+    </div>
+
+    <div class="karte">
+      <h2>Genauigkeit</h2>
+      <div class="genau"><b id="genauZahl">–</b><span id="genauWort"></span></div>
+      <p class="klein" id="genauText"></p>
+      <div style="margin-top:8px">
+        <div class="zeile"><span>Schwankung (letzte 2 s)</span><em id="zittern">–</em></div>
+      </div>
+    </div>
+
+    <div class="karte">
+      <h2>Halterungs-Test</h2>
+      <p class="klein" style="margin:0 0 12px">Das Auto bleibt dabei stehen. Halte das Handy in
+        allen drei Schritten <b>genauso wie in der Halterung</b> (z. B. hochkant, Bildschirm zu
+        dir) und schau in <b>Fahrtrichtung</b>.</p>
+      <ol class="schritte">
+        <li>
+          <p><b>① Draußen</b>, 2 m neben dem Auto, parallel zur Fahrtrichtung.</p>
+          <button data-schritt="draussen">Wert merken</button>
+          <div class="ergebnis" id="e-draussen"></div>
+        </li>
+        <li>
+          <p><b>② Im Auto, in der Hand</b> — nicht an der Halterung.</p>
+          <button data-schritt="hand" disabled>Messen</button>
+          <div class="ergebnis" id="e-hand"></div>
+        </li>
+        <li>
+          <p><b>③ In der Halterung.</b></p>
+          <button data-schritt="halter" disabled>Messen</button>
+          <div class="ergebnis" id="e-halter"></div>
+        </li>
+      </ol>
+      <div class="fazit" id="fazit"></div>
+    </div>
+
+    <p class="klein">Tipp bei schlechter Genauigkeit: Handy ein paar Mal in Form einer liegenden
+      8 durch die Luft schwenken, weg von Auto und Magneten. <a href="./">Zurück zu Staufunk</a></p>
+  </div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+
+  // Skalenstriche alle 10°, lange alle 30°
+  var striche = '';
+  for (var g = 0; g < 360; g += 10) {
+    var lang = g % 30 === 0, r1 = lang ? 80 : 85, w = g * Math.PI / 180;
+    striche += '<line x1="' + (115 + Math.sin(w) * r1).toFixed(1) + '" y1="' + (115 - Math.cos(w) * r1).toFixed(1) +
+      '" x2="' + (115 + Math.sin(w) * 92).toFixed(1) + '" y2="' + (115 - Math.cos(w) * 92).toFixed(1) +
+      '" stroke="rgba(255,255,255,' + (lang ? '.5' : '.2') + ')" stroke-width="' + (lang ? 2 : 1) + '"/>';
+  }
+  $('striche').innerHTML = striche;
+
+  var proben = [];          // { t, h, acc } der letzten Sekunden
+  var quelle = null;        // 'ios' | 'android'
+  var letzteAcc = null;
+  var sammler = null;       // laufende Messung für den Halterungs-Test
+  var messungen = {};       // draussen / hand / halter → { h, acc, zittern }
+  var zeichnenGeplant = false;
+
+  var RICHTUNG = ['N', 'NO', 'O', 'SO', 'S', 'SW', 'W', 'NW'];
+  var richtungWort = function (h) { return RICHTUNG[Math.round(h / 45) % 8]; };
+
+  // Kreismittel: 359° und 1° ergeben 0°, nicht 180°
+  function kreis(liste) {
+    if (!liste.length) return null;
+    var s = 0, c = 0;
+    liste.forEach(function (h) { var w = h * Math.PI / 180; s += Math.sin(w); c += Math.cos(w); });
+    s /= liste.length; c /= liste.length;
+    var R = Math.min(1, Math.sqrt(s * s + c * c));
+    var mittel = (Math.atan2(s, c) * 180 / Math.PI + 360) % 360;
+    var streu = R > 0 ? Math.sqrt(-2 * Math.log(R)) * 180 / Math.PI : 180;
+    return { h: mittel, streu: streu };
+  }
+  var abstand = function (a, b) { return ((b - a + 540) % 360) - 180; };
+
+  function bewertung(acc) {
+    if (acc == null) return null;
+    if (acc < 0) return { k: 'schlecht', wort: 'nicht kalibriert',
+      text: 'Das iPhone traut seinem Kompass gerade gar nicht. Einmal in Form einer 8 schwenken.' };
+    if (acc <= 5)  return { k: 'gut', wort: 'sehr gut', text: '' };
+    if (acc <= 10) return { k: 'gut', wort: 'gut', text: '' };
+    if (acc <= 20) return { k: 'mittel', wort: 'mäßig',
+      text: 'Für die grobe Richtung reicht das. Schwenken in Form einer 8 macht es meist besser.' };
+    return { k: 'schlecht', wort: 'schlecht',
+      text: 'So weiß das Navi im Stand nicht, wohin du schaust. Weg von Metall und Magneten, dann in Form einer 8 schwenken.' };
+  }
+
+  function aufnehmen(h, acc) {
+    var t = performance.now();
+    proben.push({ t: t, h: h });
+    while (proben.length && t - proben[0].t > 2000) proben.shift();
+    if (acc != null) letzteAcc = acc;
+    if (sammler) sammler.push(h);
+    if (!zeichnenGeplant) { zeichnenGeplant = true; requestAnimationFrame(zeichnen); }
+  }
+
+  var gedreht = 0;   // fortlaufender Winkel, damit die Rose bei 359→0 nicht einmal herumwirbelt
+  function zeichnen() {
+    zeichnenGeplant = false;
+    var p = proben[proben.length - 1];
+    if (!p) return;
+    gedreht += abstand(((-gedreht % 360) + 360) % 360, p.h) * -1;
+    $('drehteil').style.transform = 'rotate(' + gedreht.toFixed(1) + 'deg)';
+    $('grad').textContent = Math.round(p.h) % 360 + '°';
+    $('richtung').textContent = richtungWort(p.h);
+
+    var b = bewertung(letzteAcc);
+    if (quelle === 'android') {
+      $('genauZahl').textContent = '?';
+      $('genauWort').textContent = '';
+      $('genauText').textContent = 'Die Genauigkeit in Grad liefert nur Safari auf dem iPhone.';
+    } else if (b) {
+      $('genauZahl').textContent = letzteAcc < 0 ? '–' : '±' + Math.round(letzteAcc) + '°';
+      $('genauZahl').className = b.k;
+      $('genauWort').textContent = b.wort;
+      $('genauWort').className = b.k;
+      $('genauText').textContent = (letzteAcc >= 0
+        ? '±' + Math.round(letzteAcc) + '° heißt: Die wahre Richtung liegt irgendwo zwischen ' +
+          Math.round((p.h - letzteAcc + 360) % 360) + '° und ' + Math.round((p.h + letzteAcc) % 360) + '°. '
+        : '') + b.text;
+    }
+
+    var k = kreis(proben.map(function (x) { return x.h; }));
+    if (k && proben.length > 5) {
+      var z = k.streu;
+      $('zittern').textContent = z < 1.5 ? 'ruhig' : z < 5 ? '±' + z.toFixed(0) + '° — leicht' : '±' + z.toFixed(0) + '° — unruhig';
+      $('zittern').className = z < 1.5 ? 'gut' : z < 5 ? 'mittel' : 'schlecht';
+    }
+  }
+
+  function lauschen() {
+    window.addEventListener('deviceorientation', function (e) {
+      if (e.webkitCompassHeading != null && !isNaN(e.webkitCompassHeading)) {
+        quelle = 'ios';
+        aufnehmen(e.webkitCompassHeading, e.webkitCompassAccuracy);
+      }
+    });
+    // Android: nordbezogene Ausrichtung kommt als eigenes Ereignis
+    window.addEventListener('deviceorientationabsolute', function (e) {
+      if (quelle === 'ios' || e.alpha == null) return;
+      quelle = 'android';
+      aufnehmen((360 - e.alpha) % 360, null);
+    });
+    $('startkarte').hidden = true;
+    $('anzeige').hidden = false;
+    setTimeout(function () {
+      if (!quelle) {
+        $('startkarte').hidden = false;
+        $('anzeige').hidden = true;
+        fehler('Kein Kompass gefunden. Die Seite muss auf dem Handy laufen — am Computer gibt es keinen.');
+      }
+    }, 3000);
+  }
+
+  function fehler(text) { $('fehler').textContent = text; $('fehler').hidden = false; }
+
+  $('start').onclick = function () {
+    var D = window.DeviceOrientationEvent;
+    if (D && typeof D.requestPermission === 'function') {
+      D.requestPermission().then(function (r) {
+        if (r === 'granted') lauschen();
+        else fehler('Ohne Erlaubnis kein Kompass. In Safari: „aA“ in der Adressleiste › Website-Einstellungen › Bewegung & Ausrichtung erlauben, dann neu laden.');
+      }).catch(function () {
+        fehler('Die Erlaubnis ließ sich nicht abfragen. Seite neu laden und nochmal tippen.');
+      });
+    } else {
+      lauschen();
+    }
+  };
+
+  // ── Halterungs-Test ──────────────────────────────────────
+  var NAMEN = { draussen: 'Draußen', hand: 'In der Hand', halter: 'In der Halterung' };
+  var knoepfe = document.querySelectorAll('[data-schritt]');
+
+  Array.prototype.forEach.call(knoepfe, function (k) {
+    k.onclick = function () {
+      if (sammler) return;
+      var schritt = k.dataset.schritt;
+      sammler = [];
+      Array.prototype.forEach.call(knoepfe, function (x) { x.disabled = true; });
+      var rest = 3;
+      k.textContent = 'Stillhalten … ' + rest;
+      var uhr = setInterval(function () {
+        rest -= 1;
+        if (rest > 0) { k.textContent = 'Stillhalten … ' + rest; return; }
+        clearInterval(uhr);
+        var m = kreis(sammler);
+        sammler = null;
+        k.textContent = schritt === 'draussen' ? 'Neu merken' : 'Nochmal messen';
+        if (m) messungen[schritt] = { h: m.h, streu: m.streu, acc: letzteAcc };
+        freigeben();
+        auswerten();
+      }, 1000);
+    };
+  });
+
+  function freigeben() {
+    Array.prototype.forEach.call(knoepfe, function (x) {
+      x.disabled = x.dataset.schritt !== 'draussen' && !messungen.draussen;
+    });
+  }
+
+  function auswerten() {
+    var ref = messungen.draussen;
+    ['draussen', 'hand', 'halter'].forEach(function (s) {
+      var m = messungen[s], el = $('e-' + s);
+      if (!m) { el.innerHTML = ''; return; }
+      var acc = m.acc != null && m.acc >= 0 ? ' · Genauigkeit ±' + Math.round(m.acc) + '°' : '';
+      if (s === 'draussen' || !ref) {
+        el.innerHTML = Math.round(m.h) % 360 + '° ' + richtungWort(m.h) + acc;
+        return;
+      }
+      var d = abstand(ref.h, m.h), b = Math.abs(d);
+      var klasse = b <= 8 ? 'gut' : b <= 20 ? 'mittel' : 'schlecht';
+      el.innerHTML = Math.round(m.h) % 360 + '° · <b class="' + klasse + '">' +
+        (d > 0 ? '+' : '') + Math.round(d) + '° gegenüber draußen</b>' + acc;
+    });
+
+    var f = '';
+    if (ref && messungen.halter) {
+      var dH = Math.abs(abstand(ref.h, messungen.halter.h));
+      var dHand = messungen.hand ? Math.abs(abstand(ref.h, messungen.hand.h)) : null;
+      if (dH <= 8) {
+        f = '✅ In der Halterung weicht der Kompass nur ' + Math.round(dH) + '° ab. Die Halterung ist ' +
+            'unschuldig — die falsche Richtung beim Losfahren kommt woanders her.';
+      } else if (dHand != null && dHand > 20) {
+        f = '🚗 Schon in der Hand im Auto liegt der Kompass ' + Math.round(dHand) + '° daneben — das Blech ' +
+            'des Autos lenkt ihn ab, nicht nur die Halterung. Verlass dich beim Losfahren auf die erste ' +
+            'Ansage („Richtung …-Straße“), nicht auf den Pfeil. Nach 20–30 m Fahrt kennt das Navi die ' +
+            'Richtung aus dem GPS.';
+      } else {
+        f = '🧲 Die Halterung verdreht den Kompass um ' + Math.round(dH) + '°' +
+            (dHand != null ? ' (in der Hand nur ' + Math.round(dHand) + '°)' : '') + '. Abhilfe: Handy ' +
+            'vor dem Losfahren kurz aus der Halterung nehmen und schauen, wohin die Linie zeigt — oder ' +
+            'eine Halterung ohne Magnet nehmen.';
+      }
+    } else if (ref && messungen.hand) {
+      f = 'Jetzt noch ③ in der Halterung messen.';
+    }
+    $('fazit').textContent = f;
+  }
+})();
+</script>
+</body>
+</html>
