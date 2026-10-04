@@ -10,30 +10,33 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Staufunk">
-  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=32">
+  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=33">
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <link rel="manifest" href="manifest.json">
   <title>Staufunk</title>
-  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=32">
-  <link rel="stylesheet" href="stil.css?v=32">
+  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=33">
+  <link rel="stylesheet" href="stil.css?v=33">
 </head>
 <body>
 
   <div id="karte"></div>
 
-  <!-- Abbiegebanner: nur waehrend der Fahrt, bewusst gross und kontraststark -->
+  <!-- Abbiegebanner: steht, solange ein Ziel gesetzt ist; bewusst gross und kontraststark -->
   <div id="banner" hidden>
     <div id="banner-pfeil">↑</div>
     <div id="banner-text">
       <div id="banner-entfernung">–</div>
       <div id="banner-anweisung">–</div>
+      <div id="banner-strasse" hidden></div>
       <div id="banner-danach" hidden></div>
       <div id="banner-spuren" hidden></div>
+      <div id="banner-aktuell" hidden></div>
     </div>
   </div>
 
   <!-- Blitzer- und Stauhinweise -->
   <div id="fahnen">
+    <div id="gpsfahne" hidden></div>
     <div id="ersatzfahne" hidden></div>
     <div id="blitzfahne" hidden></div>
     <div id="stoerfahne" hidden></div>
@@ -59,7 +62,7 @@
     <div id="status">Suche Standort …</div>
 
     <div id="knoepfe">
-      <button id="k-folgen"  class="an">Folgen</button>
+      <button id="k-folgen"  class="an">Folgt ✓</button>
       <button id="k-sprache">Ansage</button>
       <button id="k-stau" class="warn">Stau!</button>
       <button id="k-verkehr">Verkehr</button>
@@ -157,11 +160,11 @@
     </div>
   </div>
 
-  <script src="vendor/maplibre/maplibre-gl.js?v=32"></script>
-  <script src="verkehr.js?v=32"></script>
+  <script src="vendor/maplibre/maplibre-gl.js?v=33"></script>
+  <script src="verkehr.js?v=33"></script>
   <!-- tut nichts, ausser die Adresse enthaelt ?pruefstand -->
-  <script src="pruefstand.js?v=32"></script>
-  <script src="app.js?v=32"></script>
+  <script src="pruefstand.js?v=33"></script>
+  <script src="app.js?v=33"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {

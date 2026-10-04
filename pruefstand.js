@@ -13,13 +13,19 @@
   if (location.search.indexOf('pruefstand') < 0) return;
 
   var lage = { lat: 48.5216, lon: 9.0576, kurs: 90, tempo: 0 };
-  var melder = [], takt = null, weg = null, index = 0;
+  var melder = {}, naechsteId = 1, takt = null, weg = null, index = 0, gpsAus = false;
 
+  // Wie ein echtes GPS: meldet sich auch im Stand etwa jede Sekunde. Mit
+  // "GPS aus" verstummt es - so laesst sich der GPS-Waechter der App pruefen.
   navigator.geolocation.watchPosition = function (ok) {
-    melder.push(ok); ok(bau()); return melder.length;
+    var id = naechsteId++;
+    melder[id] = ok;
+    if (!gpsAus) setTimeout(function () { if (melder[id] && !gpsAus) ok(bau()); }, 50);
+    return id;
   };
   navigator.geolocation.getCurrentPosition = function (ok) { ok(bau()); };
-  navigator.geolocation.clearWatch = function () {};
+  navigator.geolocation.clearWatch = function (id) { delete melder[id]; };
+  setInterval(function () { if (!takt) melden(); }, 1000);
 
   function bau() {
     return { coords: {
@@ -27,7 +33,10 @@
       heading: lage.kurs, speed: lage.tempo, altitude: null, altitudeAccuracy: null
     }, timestamp: Date.now() };
   }
-  function melden() { melder.forEach(function (f) { try { f(bau()); } catch (e) {} }); }
+  function melden() {
+    if (gpsAus) return;
+    Object.keys(melder).forEach(function (id) { try { melder[id](bau()); } catch (e) {} });
+  }
   function melde(t) { var e = document.getElementById('p-lage'); if (e) e.textContent = t; }
 
   // Von aussen setzbar, damit sich auch Sonderfälle prüfen lassen
@@ -69,6 +78,7 @@
     leiste.id = 'pruef';
     leiste.innerHTML = '<button id="p-fahrt">Fahrt starten</button>' +
                        '<button id="p-halt">Stopp</button>' +
+                       '<button id="p-gps">GPS aus</button>' +
                        '<span id="p-lage">steht</span>';
     document.body.appendChild(leiste);
     var stil = document.createElement('style');
@@ -79,7 +89,7 @@
       'background:rgba(255,255,255,.2);color:#fff;font:inherit}' +
       '#pruef span{opacity:.85;margin-left:auto}' +
       '#banner{top:34px!important}#fahnen{top:42px!important}' +
-      '#banner:not([hidden]) ~ #fahnen{top:150px!important}';
+      '#banner:not([hidden]) ~ #fahnen{top:calc(var(--banner-h,108px) + 42px)!important}';
     document.head.appendChild(stil);
 
     document.getElementById('p-fahrt').onclick = function () {
@@ -88,6 +98,11 @@
       if (weg.length < 2) { melde('erst ein Ziel setzen'); return; }
       index = 0;
       takt = setInterval(schritt, 600);
+    };
+    document.getElementById('p-gps').onclick = function () {
+      gpsAus = !gpsAus;
+      this.textContent = gpsAus ? 'GPS an' : 'GPS aus';
+      melde(gpsAus ? 'GPS stumm' : 'GPS da');
     };
     document.getElementById('p-halt').onclick = function () {
       clearInterval(takt); takt = null; lage.tempo = 0; melden(); melde('steht');

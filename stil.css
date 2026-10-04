@@ -32,7 +32,7 @@ html, body {
 }
 #banner[hidden] { display: none; }
 #banner-pfeil { font-size: 46px; line-height: 1; font-weight: 300; min-width: 52px; text-align: center; }
-#banner-text { min-width: 0; }
+#banner-text { min-width: 0; flex: 1; }
 #banner-entfernung { font-size: 30px; font-weight: 650; letter-spacing: -.02em; }
 #banner-anweisung {
   font-size: 17px; opacity: .78; margin-top: 1px;
@@ -41,7 +41,23 @@ html, body {
 /* Kurz vor dem Abbiegepunkt faerbt sich der Banner - das sieht man im
    Augenwinkel, ohne hinzusehen. */
 #banner.gleich { background: rgba(210, 120, 0, .95); }
-#banner.gleich #banner-entfernung { font-size: 34px; }
+#banner.gleich #banner-entfernung { font-size: 40px; }
+#banner.gleich #banner-pfeil { font-size: 58px; min-width: 62px; }
+#banner.gleich #banner-anweisung { font-size: 20px; opacity: .95; font-weight: 600; }
+/* Wohin: "auf B 27 Richtung Stuttgart" */
+#banner-strasse {
+  font-size: 16px; font-weight: 600; margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#banner-strasse[hidden] { display: none; }
+#banner.gleich #banner-strasse { font-size: 18px; }
+/* "noch 3,1 km auf B 27" - leise, unterste Zeile */
+#banner-aktuell {
+  font-size: 13px; opacity: .55; margin-top: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#banner-aktuell[hidden] { display: none; }
+#banner.gleich #banner-aktuell { opacity: .75; }
 
 /* ------------------------------------------------------------- Sperrfahne */
 #sperrfahne {
@@ -51,7 +67,7 @@ html, body {
   background: rgba(200, 45, 45, .94);
   font-size: 14px; font-weight: 560; text-align: center;
 }
-#banner:not([hidden]) ~ #sperrfahne { top: calc(env(safe-area-inset-top) + 96px); }
+#banner:not([hidden]) ~ #sperrfahne { top: calc(var(--banner-h, 108px) + 8px); }
 #sperrfahne[hidden] { display: none; }
 
 /* ------------------------------------------------------------- Untere Leiste */
@@ -120,6 +136,8 @@ html, body {
   font-size: 12.5px; font-family: inherit;
 }
 #knoepfe button.an { background: #1f6feb; border-color: #1f6feb; }
+/* Folgen aus: auffaellig, damit man es sieht und mit einem Tipp zurueckholt */
+#knoepfe button.los { background: #b86a00; border-color: #e08a10; color: #fff; font-weight: 650; }
 #knoepfe button.warn { background: #c82d2d; border-color: #c82d2d; }
 
 /* Leaflet-Bedienelemente aus dem Weg raeumen - beim Fahren nutzt man sie nicht */
@@ -138,6 +156,9 @@ html, body {
   background: #1f6feb; border: 3px solid #fff;
   box-shadow: 0 0 0 1px rgba(0,0,0,.35), 0 2px 6px rgba(0,0,0,.5);
 }
+/* Kein frischer GPS-Punkt: grau statt blau - der Punkt steht nur noch dort,
+   wo er zuletzt war */
+.ich-punkt.alt, .alt .ich-punkt { background: #7a828c; }
 .ich-kegel {
   width: 0; height: 0;
   border-left: 13px solid transparent; border-right: 13px solid transparent;
@@ -157,7 +178,8 @@ html, body {
   top: calc(env(safe-area-inset-top) + 8px);
   display: flex; flex-direction: column; gap: 6px; pointer-events: none;
 }
-#banner:not([hidden]) ~ #fahnen { top: calc(env(safe-area-inset-top) + 108px); }
+/* --banner-h setzt app.js (bannerHoeheMelden) auf die echte Bannerhoehe */
+#banner:not([hidden]) ~ #fahnen { top: calc(var(--banner-h, 108px) + 8px); }
 #fahnen > div { padding: 8px 12px; border-radius: 11px; font-size: 13.5px;
                 font-weight: 560; text-align: center; }
 /* die Stoerfahne ist antippbar - die anderen Fahnen nicht */
@@ -167,6 +189,7 @@ html, body {
 #blitzfahne { background: rgba(230, 170, 20, .95); color: #1a1400; }
 #ersatzfahne { background: rgba(120, 90, 160, .95); font-size: 12.5px; }
 #stoerfahne { background: rgba(200, 45, 45, .94); }
+#gpsfahne { background: rgba(60, 66, 74, .95); border: 1px solid rgba(255,255,255,.2); }
 
 /* ------------------------------------------------------------ Zwischenziele */
 #stoppliste { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -257,11 +280,8 @@ html, body {
   box-shadow: 0 2px 8px rgba(0,0,0,.4);
 }
 #temposchild[hidden] { display: none; }
-#temposchild.drueber { animation: blinken 1s infinite; }
-@keyframes blinken {
-  0%, 100% { background: #fff; color: #111; }
-  50% { background: #d63430; color: #fff; }
-}
+/* Deutlich zu schnell: die eigene Tempoanzeige wird rot - ruhig, ohne Blinken */
+#tempojetzt.drueber { background: rgba(214, 52, 48, .92); border-color: #d63430; }
 
 .maplibregl-ctrl-attrib { background: rgba(16,20,24,.6) !important; }
 .maplibregl-ctrl-attrib, .maplibregl-ctrl-attrib a { color: rgba(242,244,246,.6) !important; font-size: 9px !important; }

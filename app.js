@@ -127,7 +127,24 @@
   var gerechneteNogos = null;            // Sperren, mit denen die Route gerechnet ist
   var verkehrLuecke = '';                // Quellen, die zuletzt nichts geliefert haben
   var fahrmodus = false, drehung = 0, zoomStufe = 0, tempoKmh = 0;
-  var kumWeg = [], limits = [], limitAktuell = null, limitGesagt = null;
+  var kumWeg = [], limitAktuell = null, limitGesagt = null, limitGesagtUm = 0;
+  var abschnitte = null;                 // strassenArten() der gewaehlten Route
+  // Strassennamen kommen von OSRM (BRouter kennt keine), siehe strassenLaufBauen()
+  var strassenLauf = null;
+  // Standort-Wachhund: iOS laesst watchPosition nach App-Wechsel (Spotify)
+  // oder Bildschirmsperre manchmal still einschlafen - dann kommt keine
+  // Position mehr und die Karte "haengt", obwohl man faehrt. Nach GPS_STILL
+  // ohne Meldung wird das angezeigt und die Abfrage neu gestartet.
+  var GPS_STILL = 10000;
+  var gpsId = null, letzteMeldung = 0, gpsNeustart = 0, genauigkeit = 0;
+  // Beim Fahren rastet Folgen von selbst wieder ein, wenn die Karte so lange
+  // nicht beruehrt wurde. Vorher blieb es nach jedem Verschieben, nach
+  // "Übersicht" oder der Stoerfahne fuer immer aus.
+  var WIEDER_FOLGEN = 20000;
+  var kartenBeruehrt = 0, fingerAufKarte = false;
+  // Nach einer Berechnung mit mehreren Vorschlaegen bleiben die so lange
+  // stehen; danach raeumt die Fahrt sie weg (alternativenRaeumen)
+  var auswahlBis = 0;
   var verkehrKarteAn = true;
   var modus = 'auto';                    // 'auto' | 'rad'
   var feldwegeFrei = false, schotterOk = false;
@@ -229,10 +246,12 @@
   // 15 m GPS-Streuung lag ein spaeterer Abschnitt sonst oft "naeher" - an
   // einer Wende sprang der Fortschritt 400 m vor und der Banner uebersprang
   // zwei Hinweise.
-  var lotIdx = -1, lotS = 0;
+  var lotIdx = -1, lotS = 0, lotMerk = { ll: null, r: null, p: null };
   function lotAufStrecke(ll) {
     var n = routePunkte.length;
     if (n < 2 || kumWeg.length !== n) return null;
+    // Banner, Fahrtzeile und Temposchild fragen fuer dieselbe Position
+    if (ll === lotMerk.ll && routePunkte === lotMerk.r && lotIdx >= 0) return lotMerk.p;
     function suche(von, bis, stetig) {
       var best = null;
       for (var i = Math.max(1, von); i <= Math.min(n - 1, bis); i++) {
@@ -267,7 +286,8 @@
     }
     lotIdx = treffer.i;
     lotS = treffer.s;
-    return { s: treffer.s, d: treffer.d, idx: treffer.i };
+    lotMerk = { ll: ll, r: routePunkte, p: { s: treffer.s, d: treffer.d, idx: treffer.i } };
+    return lotMerk.p;
   }
   function uhrzeit(minutenSpaeter) {
     var d = new Date(Date.now() + minutenSpaeter * 60000);
@@ -298,6 +318,9 @@
   }
 
   function folgeAnsicht(ll) {
+    // Liegt ein Finger auf der Karte (Zoomen mit zwei Fingern), nicht
+    // dagegen anfahren - sonst ruckelt die Geste. Danach geht es weiter.
+    if (fingerAufKarte) return;
     if (!fahrmodus || kurs === null) {
       kamera({ center: m(ll), zoom: Math.max(karte.getZoom(), 16), duration: 800 });
       return;
@@ -314,14 +337,18 @@
     });
   }
 
-  /* ------------------------------------------------------------------- Karte */  /* ------------------------------------------------------------------- Karte */
+  /* ------------------------------------------------------------------- Karte */
   function kartenAufbau() {
     karte = new maplibregl.Map({
       container: 'karte',
       style: STILE[nacht ? 'nacht' : 'tag'].url,
       center: [9.0576, 48.5216], zoom: 13,
       attributionControl: { compact: true, customAttribution: QUELLE },
-      pitchWithRotate: false, dragRotate: false
+      pitchWithRotate: false, dragRotate: false,
+      // Erst ab 8 Pixeln Bewegung gilt eine Beruehrung als Verschieben (statt
+      // 3). Im fahrenden Auto wackelt der Finger beim Antippen - und jedes
+      // Verschieben schaltet das Folgen ab.
+      clickTolerance: 8
     });
     karte.once('style.load', ebenenAnlegen);
 
@@ -373,7 +400,28 @@
       if (i != null && sperren[i]) sperreEntfernen(sperren[i]);
     });
 
-    karte.on('dragstart', function () { if (folgen) folgenSetzen(false); });
+    // Folgen aus, wenn man die Karte mit EINEM Finger verschiebt. Zoomen mit
+    // zwei Fingern laesst es an - MapLibre meldet dabei ebenfalls dragstart,
+    // und genau das schaltete das Folgen bisher still ab.
+    karte.on('dragstart', function (e) {
+      kartenBeruehrt = Date.now();
+      var t = e.originalEvent && e.originalEvent.touches;
+      if (t && t.length > 1) return;
+      if (folgen) folgenSetzen(false);
+    });
+    karte.on('zoomstart', function (e) { if (e.originalEvent) kartenBeruehrt = Date.now(); });
+    // Mit der Maus (oder langem Ziehen) zaehlt das ENDE der Geste
+    karte.on('dragend', function () { kartenBeruehrt = Date.now(); });
+    var flaeche = karte.getCanvasContainer();
+    flaeche.addEventListener('touchstart', function () {
+      fingerAufKarte = true; kartenBeruehrt = Date.now();
+    }, { passive: true });
+    ['touchend', 'touchcancel'].forEach(function (t) {
+      flaeche.addEventListener(t, function (e) {
+        if (!e.touches || !e.touches.length) fingerAufKarte = false;
+        kartenBeruehrt = Date.now();
+      }, { passive: true });
+    });
   }
 
   // Nach jedem Stilwechsel muessen die eigenen Ebenen neu angelegt werden -
@@ -585,35 +633,79 @@
     });
   }
 
-  /* ---------------------------------------------------------------- Standort */  /* ---------------------------------------------------------------- Standort */
+  /* ---------------------------------------------------------------- Standort */
+  // Startet die Positionsabfrage - oder startet sie neu, wenn sie haengt
+  // (siehe gpsWache). Die alte wird vorher abgemeldet, sonst kaeme jede
+  // Position doppelt.
   function standortStarten() {
     if (!navigator.geolocation) { info('Kein Standort verfügbar'); return; }
-    navigator.geolocation.watchPosition(function (p) {
-      var ll = [p.coords.latitude, p.coords.longitude];
-      var erste = !standort;
-      standort = ll;
-      if (typeof p.coords.heading === 'number' && !isNaN(p.coords.heading) && p.coords.speed > 1) {
-        kurs = p.coords.heading;
-      }
-      tempoKmh = (p.coords.speed || 0) * 3.6;
-      ichZeichnen(ll, p.coords.accuracy);
-      if (folgen) {
+    if (gpsId !== null) { try { navigator.geolocation.clearWatch(gpsId); } catch (e) {} }
+    gpsNeustart = Date.now();
+    gpsId = navigator.geolocation.watchPosition(positionNeu, positionFehler,
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
+  }
+
+  // Ein Fehler in einem Teil (Banner, Blitzer, ...) darf die anderen nicht
+  // mitreissen - schon gar nicht das Folgen der Karte.
+  function sicher(f, ll) {
+    try { f(ll); } catch (e) { if (window.console) console.error(e); }
+  }
+
+  function positionNeu(p) {
+    letzteMeldung = Date.now();
+    var ll = [p.coords.latitude, p.coords.longitude];
+    var erste = !standort;
+    standort = ll;
+    genauigkeit = p.coords.accuracy || 0;
+    if (typeof p.coords.heading === 'number' && !isNaN(p.coords.heading) && p.coords.speed > 1) {
+      kurs = p.coords.heading;
+    }
+    // iOS meldet -1, solange es das Tempo nicht kennt
+    tempoKmh = Math.max(0, (p.coords.speed || 0) * 3.6);
+    gpsAnzeigen(0);
+    sicher(function () { ichZeichnen(ll, p.coords.accuracy); });
+    if (folgen) {
+      sicher(function () {
         if (erste) karte.jumpTo({ center: m(ll), zoom: 16 });
         else folgeAnsicht(ll);
-      }
-      if (erste && ziel) route();
-      if (ziel && routePunkte.length) {
-        bannerAktualisieren(ll);
-        blitzPruefen(ll);
-        abweichungPruefen(ll);
-        fahrdatenZeigen(ll);
-        durchfahrenPruefen(ll);
-      }
-      tempoEcke(ll);
-    }, function (e) {
-      info(e.code === 1 ? 'Standort abgelehnt – in den Einstellungen erlauben'
-                        : 'Standort nicht verfügbar');
-    }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
+      });
+    }
+    if (erste && ziel) route();
+    if (ziel && routePunkte.length) {
+      [bannerAktualisieren, blitzPruefen, abweichungPruefen, fahrdatenZeigen,
+       durchfahrenPruefen, alternativenRaeumen].forEach(function (f) { sicher(f, ll); });
+    }
+    sicher(tempoEcke, ll);
+  }
+
+  function positionFehler(e) {
+    if (e.code === 1) { info('Standort abgelehnt – in den Einstellungen erlauben'); return; }
+    info('GPS-Signal fehlt – suche weiter …');
+    // Kein Signal oder Zeitueberschreitung: neu anstossen, aber nicht im
+    // Sekundentakt
+    if (Date.now() - gpsNeustart > 15000) standortStarten();
+  }
+
+  // Laeuft alle 2 Sekunden. Erkennt die eingeschlafene Positionsabfrage und
+  // laesst Folgen beim Fahren wieder einrasten.
+  function gpsWache() {
+    var jetzt = Date.now();
+    var still = letzteMeldung ? jetzt - letzteMeldung : 0;
+    var alt = still > GPS_STILL;
+    gpsAnzeigen(alt ? still : 0);
+    if (alt && jetzt - gpsNeustart > 15000) standortStarten();
+    if (!folgen && standort && !alt && tempoKmh >= 15 &&
+        jetzt - kartenBeruehrt > WIEDER_FOLGEN && $('sheet').hidden && !$('kartenmenue')) {
+      folgenSetzen(true);
+    }
+  }
+
+  function gpsAnzeigen(still) {
+    var f = $('gpsfahne'), alt = still > 0;
+    f.hidden = !alt;
+    if (alt) f.textContent = '⚠︎ Kein GPS seit ' + Math.round(still / 1000) +
+                             ' s – Standort wird neu gesucht';
+    if (ichMarke) ichMarke.getElement().classList.toggle('alt', alt);
   }
 
   var kegelMarke = null;
@@ -1305,6 +1397,7 @@
         // Waehrend der Fahrt nur der beste Weg - der Vergleichsweg durch den
         // Stau war nur zum Abwaegen da.
         if (nurHaupt) varianten = varianten.slice(0, 1);
+        if (varianten.length > 1) auswahlBis = Date.now() + 25000;
         gerechneteNogos = nogos;
 
         // Zur zuletzt selbst gewaehlten Art zurueckfinden: erst gleiche Marke
@@ -1518,6 +1611,7 @@
         var luft = abstand(punkte[0], punkte[punkte.length - 1]) / 1000;
         varianten = plausibel(verschiedene(roh), luft).slice(0, 3);
         if (!varianten.length) varianten = roh.slice(0, 1);
+        if (varianten.length > 1) auswahlBis = Date.now() + 25000;
         variante = 0;
         gerechneteNogos = nogoParameter();
         variantenWaehlen(0);
@@ -1652,6 +1746,8 @@
       if (i === variante) b.className = 'gewaehlt';
       b.onclick = function () {
         variantenWunsch = { marke: v.marke || '', km: v.km };
+        // Gewaehlt ist gewaehlt: beim Fahren verschwinden die anderen bald
+        auswahlBis = Date.now() + 8000;
         variantenWaehlen(i);
         // Andere Strecke, andere Autobahnen: Kennungen neu ermitteln, sonst
         // kaemen die Staumeldungen weiter von der alten Strecke
@@ -1659,6 +1755,19 @@
       };
       leiste.appendChild(b);
     });
+  }
+
+  // Sobald die Fahrt mit dem gewaehlten Weg laeuft, verschwinden die anderen
+  // Vorschlaege (Linien und Kacheln) - vorher blieben alle drei bis zum Ziel
+  // stehen. Nach einer Neuberechnung mit Auswahl (Stau!, Übersicht) duerfen
+  // sie fuer auswahlBis wieder erscheinen. In der Übersicht (Folgen aus)
+  // bleibt alles stehen, dort wird ja gerade verglichen.
+  function alternativenRaeumen() {
+    if (varianten.length < 2 || !fahrmodus || tempoKmh < 12 || Date.now() < auswahlBis) return;
+    varianten = [varianten[variante]];
+    variante = 0;
+    routenZeichnen();
+    variantenZeigen();
   }
 
   function variantenWaehlen(i) {
@@ -1673,7 +1782,8 @@
     for (var ki = 1; ki < v.koord.length; ki++) {
       kumWeg.push(kumWeg[ki - 1] + abstand(v.koord[ki - 1], v.koord[ki]));
     }
-    limits = limitsAus(v.messages);
+    abschnitte = strassenArten(v);
+    strassenLauf = null;                  // Namen kommen mit spurenAnheften
     limitAktuell = null; limitGesagt = null;
     abseitsZaehler = 0;
     lotIdx = -1;                          // neue Strecke, Fortschritt neu suchen
@@ -1762,104 +1872,235 @@
 
   /* ---------------------------------------------------- Tempolimit-Schild */
   // Das Limit je Abschnitt steckt schon in BRouters Antwort (maxspeed in
-  // `messages`) - es musste nur angezeigt werden. Dazu das eigene Tempo aus
-  // dem GPS. Beim Ersatzdienst (OSRM) gibt es keine messages, dann bleibt
-  // die Ecke leer.
-  function limitsAus(messages) {
-    var raus = [];
-    if (!messages || messages.length < 2) return raus;
-    var kopf = messages[0];
-    var iLon = kopf.indexOf('Longitude'), iLat = kopf.indexOf('Latitude');
-    var iT = kopf.indexOf('WayTags');
-    if (iLon < 0 || iT < 0) return raus;
-    for (var i = 1; i < messages.length; i++) {
-      var m = /maxspeed=(\d+)/.exec(messages[i][iT] || '');
-      raus.push({
-        ort: [parseInt(messages[i][iLat], 10) / 1e6, parseInt(messages[i][iLon], 10) / 1e6],
-        limit: m ? parseInt(m[1], 10) : null
-      });
+  // `messages`, siehe strassenArten). Zugeordnet wird ueber den Fortschritt
+  // auf der Strecke: jede messages-Zeile beschreibt das Stueck BIS zu ihrem
+  // Punkt. Frueher galt der naechstgelegene Zeilenpunkt - das ist das ENDE
+  // des vorigen Stuecks, und am Anfang einer 30er-Zone stand noch die 50.
+  // Beim Ersatzdienst (OSRM) gibt es keine messages: dann kein Schild.
+  function limitAus(tags) {
+    // Gegen die Zeichenrichtung des Wegs gilt maxspeed:backward
+    var richtung = tags.reversedirection === 'yes' ? tags['maxspeed:backward'] : tags['maxspeed:forward'];
+    var w = richtung || tags.maxspeed || '';
+    // Nur echte Zahlen. none/signals/urban/rural/unknown (BRouter-Platzhalter)
+    // sind kein Wert fuers Schild - lieber keins als ein geratenes.
+    if (!/^\d{1,3}$/.test(w)) return null;
+    var z = parseInt(w, 10);
+    return z >= 5 && z <= 130 ? z : null;
+  }
+
+  function limitHier(ll) {
+    if (!abschnitte) return null;
+    var pos = lotAufStrecke(ll);
+    if (!pos || pos.d > 40) return null;   // abseits: unbekannt
+    for (var r = 0; r < abschnitte.length; r++) {
+      if (abschnitte[r].idx >= pos.idx) return abschnitte[r].limit;
     }
-    return raus;
+    return null;
   }
 
   function tempoEcke(ll) {
     var ecke = $('tempoecke');
     if (!routePunkte.length || !ziel) { ecke.hidden = true; return; }
     ecke.hidden = false;
-    $('tempojetzt').textContent = tempoKmh > 2 ? Math.round(tempoKmh) : '–';
+    var jetzt = $('tempojetzt');
+    jetzt.textContent = tempoKmh > 2 ? Math.round(tempoKmh) : '–';
 
-    if (modus === 'rad') { $('temposchild').hidden = true; return; }
-    var best = null, bestD = Infinity;
-    for (var i = 0; i < limits.length; i++) {
-      var d = abstand(ll, limits[i].ort);
-      if (d < bestD) { bestD = d; best = limits[i]; }
-    }
-    if (best && bestD < 400) limitAktuell = best.limit;
+    limitAktuell = modus === 'rad' ? null : limitHier(ll);
     var schild = $('temposchild');
-    if (!limitAktuell) { schild.hidden = true; return; }
-    schild.hidden = false;
+    schild.hidden = !limitAktuell;
+    // Ab 5 drueber wird die eigene Tempozahl rot - dezent, ohne Blinken
+    jetzt.classList.toggle('drueber', !!limitAktuell && tempoKmh > limitAktuell + 5);
+    if (!limitAktuell) { limitGesagt = null; return; }
     schild.textContent = limitAktuell;
-
-    var drueber = tempoKmh > limitAktuell + 8;
-    schild.classList.toggle('drueber', drueber);
-    if (drueber && limitGesagt !== limitAktuell) {
-      limitGesagt = limitAktuell;
-      sagen('Tempolimit ' + limitAktuell);
-    } else if (!drueber) limitGesagt = null;
+    // Ab 8 drueber einmal ansagen; erneut erst, wenn man zwischendurch
+    // wieder im Limit war (sonst plappert es an der Schwelle)
+    if (tempoKmh > limitAktuell + 8) {
+      // Wechselt das Limit gleich wieder (30-40-30), nicht jedes Mal
+      if (limitGesagt !== limitAktuell && Date.now() - limitGesagtUm > 30000) {
+        limitGesagt = limitAktuell; limitGesagtUm = Date.now();
+        sagen('Tempolimit ' + limitAktuell);
+      }
+    } else if (tempoKmh <= limitAktuell) limitGesagt = null;
   }
 
-  /* ------------------------------------------------------- Spurfuehrung */
-  // BRouter kennt keine Spuren, der offene OSRM-Dienst schon: je Kreuzung die
-  // Spurpfeile samt "gilt fuer dieses Manoever". Eine Anfrage je Route, die
-  // Spuren werden ueber den Ort an unsere Abbiegehinweise geheftet.
+  /* ------------------------------------------- Spurfuehrung und Strassennamen */
+  // BRouter kennt weder Spuren noch Strassennamen, der offene OSRM-Dienst
+  // schon: je Schritt Name, Nummer (ref), Wegweiser-Ziele und je Kreuzung die
+  // Spurpfeile. Eine Anfrage je Route; geheftet wird ueber den Ort an unsere
+  // Abbiegehinweise. OSRM rechnet aber seinen EIGENEN Weg - deshalb wird
+  // jeder Schritt geprueft, ob er wirklich dort weiterfaehrt, wo wir fahren.
   var SPURPFEIL = { 'uturn': '⤸', 'sharp left': '↙', 'left': '←', 'slight left': '↖',
                     'straight': '↑', 'none': '↑',
                     'slight right': '↗', 'right': '→', 'sharp right': '↘',
                     'merge to left': '↰', 'merge to right': '↱' };
   var spurSpeicher = { kennung: null, orte: [] };
 
+  // OSRM-Wegweiser: "B 28, B 28, , : Hechingen, Herrenberg, Reutlingen"
+  // -> "Hechingen, Herrenberg" (Orte nach dem Doppelpunkt, hoechstens zwei)
+  function zieleText(d) {
+    if (!d) return '';
+    var teile = String(d).split(':'), liste = [];
+    teile[teile.length - 1].split(',').forEach(function (o) {
+      o = o.trim();
+      if (o && liste.indexOf(o) < 0) liste.push(o);
+    });
+    return liste.slice(0, 2).join(', ');
+  }
+
   function spurenErmitteln(punkte) {
     var kennung = punkte.map(function (p) { return p[0].toFixed(4) + p[1].toFixed(4); }).join('|');
     if (spurSpeicher.kennung === kennung) return Promise.resolve(spurSpeicher.orte);
     var koords = punkte.map(function (p) { return p[1] + ',' + p[0]; }).join(';');
-    return hol(OSRM + koords + '?steps=true&overview=false', 20000)
+    return hol(OSRM + koords + '?steps=true&overview=false&geometries=geojson', 20000)
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
         var orte = [];
         if (d && d.routes && d.routes[0]) {
           d.routes[0].legs.forEach(function (leg) {
             (leg.steps || []).forEach(function (st) {
+              if (!st.maneuver || st.maneuver.type === 'arrive') return;
               var kreuzung = (st.intersections || [])[0];
-              if (!kreuzung || !kreuzung.lanes || !st.maneuver) return;
               orte.push({
                 ort: [st.maneuver.location[1], st.maneuver.location[0]],
-                spuren: kreuzung.lanes.map(function (l) {
+                name: st.name || '',
+                ref: String(st.ref || '').split(';')[0].trim(),
+                ziele: zieleText(st.destinations),
+                ausfahrt: st.exits ? String(st.exits).split(';')[0].trim() : '',
+                geo: ((st.geometry && st.geometry.coordinates) || []).map(function (c) { return [c[1], c[0]]; }),
+                spuren: kreuzung && kreuzung.lanes ? kreuzung.lanes.map(function (l) {
                   return {
                     zeichen: (l.indications || []).map(function (i) {
                       return SPURPFEIL[i] || '↑';
                     }).join(''),
                     an: !!l.valid
                   };
-                })
+                }) : null
               });
             });
           });
         }
-        spurSpeicher = { kennung: kennung, orte: orte };
+        // Nur Brauchbares merken - ein Fehlschlag soll beim naechsten Mal
+        // neu versucht werden
+        if (orte.length) spurSpeicher = { kennung: kennung, orte: orte };
         return orte;
       })
       .catch(function () { return []; });
   }
 
+  // Kurzname einer Strasse: Nummer vor Name ("B 27" statt "Stuttgarter Str.")
+  function strassenName(st) { return st ? (st.ref || st.name || '') : ''; }
+
+  // Punkt `meter` weit entlang eines Linienzugs
+  function punktEntlang(geo, meter) {
+    for (var i = 1; i < geo.length; i++) {
+      var d = abstand(geo[i - 1], geo[i]);
+      if (d >= meter) {
+        var t = meter / Math.max(d, 0.01);
+        return [geo[i - 1][0] + t * (geo[i][0] - geo[i - 1][0]),
+                geo[i - 1][1] + t * (geo[i][1] - geo[i - 1][1])];
+      }
+      meter -= d;
+    }
+    return geo[geo.length - 1];
+  }
+
+  // Faehrt der OSRM-Schritt hinter dem Abbiegepunkt dort weiter, wo unsere
+  // Route weiterfaehrt? Geprueft 60 m hinter dem Manoever.
+  function schrittPasst(st, h) {
+    if (!st.geo || st.geo.length < 2 || h.idx == null || h.s == null) return false;
+    var p = punktEntlang(st.geo, 60);
+    for (var i = Math.max(1, h.idx); i < routePunkte.length && kumWeg[i - 1] <= h.s + 250; i++) {
+      if (punktZuStrecke(p, routePunkte[i - 1], routePunkte[i]) < 12) return true;
+    }
+    return false;
+  }
+
+  // Wo auf der eigenen Route welche Strasse gilt: die Route wird alle 40 m
+  // abgetastet, und nur wo ein OSRM-Abschnitt hoechstens 20 m daneben liegt,
+  // bekommt die Stelle dessen Namen. Wo die Wege auseinandergehen, bleibt
+  // die Strasse unbekannt - lieber nichts als etwas Falsches.
+  // Ergebnis: Laeufe [{von, bis, name}] in Metern ab Routenanfang.
+  var TAKT = 40;
+  function strassenLaufBauen(orte) {
+    var n = routePunkte.length;
+    if (n < 2 || kumWeg.length !== n || !orte.length) return null;
+    var stuecke = [];
+    orte.forEach(function (st, k) {
+      for (var i = 1; i < st.geo.length; i++) stuecke.push({ a: st.geo[i - 1], b: st.geo[i], k: k });
+    });
+    if (!stuecke.length) return null;
+    var zeiger = 0;
+    // Erst vorwaerts in der Naehe suchen (beide Wege laufen in derselben
+    // Richtung); nur wenn dort nichts liegt und `weit`, bis zum Ende - so
+    // findet die Zuordnung auch nach einem Stueck Abweichung wieder zurueck.
+    function naechster(p, weit) {
+      function suche(bis) {
+        var best = -1, bd = 20;
+        for (var i = zeiger; i < bis; i++) {
+          var d = punktZuStrecke(p, stuecke[i].a, stuecke[i].b);
+          if (d < bd) { bd = d; best = i; }
+        }
+        return best;
+      }
+      var b = suche(Math.min(stuecke.length, zeiger + 150));
+      if (b < 0 && weit) b = suche(stuecke.length);
+      if (b < 0) return -1;
+      zeiger = b;
+      return stuecke[b].k;
+    }
+    var proben = [], j = 1, gesamt = kumWeg[n - 1];
+    for (var s = 0, z = 0; s <= gesamt; s += TAKT, z++) {
+      while (j < n - 1 && kumWeg[j] < s) j++;
+      var t = Math.max(0, Math.min(1, (s - kumWeg[j - 1]) / Math.max(1, kumWeg[j] - kumWeg[j - 1])));
+      var a = routePunkte[j - 1], b = routePunkte[j];
+      proben.push(naechster([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])], z % 10 === 0));
+    }
+    // Einzelne Aussetzer an Kreuzungen ueberbruecken
+    for (var i = 1; i < proben.length - 1; i++) {
+      if (proben[i] < 0 && proben[i - 1] >= 0 && proben[i + 1] >= 0 &&
+          strassenName(orte[proben[i - 1]]) === strassenName(orte[proben[i + 1]])) proben[i] = proben[i - 1];
+    }
+    var laeufe = [];
+    proben.forEach(function (k, z) {
+      var name = k < 0 ? null : strassenName(orte[k]);
+      var letzter = laeufe[laeufe.length - 1];
+      if (letzter && letzter.name === name) { letzter.bis = z * TAKT + TAKT / 2; return; }
+      laeufe.push({ von: Math.max(0, z * TAKT - TAKT / 2), bis: z * TAKT + TAKT / 2, name: name });
+    });
+    return { koord: routePunkte, laeufe: laeufe };
+  }
+
+  // Strasse an der Stelle s der Route: { name, rest } oder null
+  function strasseBei(s) {
+    if (!strassenLauf || strassenLauf.koord !== routePunkte) return null;
+    var l = strassenLauf.laeufe;
+    for (var i = 0; i < l.length; i++) {
+      if (l[i].von <= s && s < l[i].bis) return l[i].name ? { name: l[i].name, rest: l[i].bis - s } : null;
+    }
+    return null;
+  }
+
   function spurenAnheften(punkte) {
+    var fuer = routePunkte;
     spurenErmitteln(punkte).then(function (orte) {
+      if (routePunkte !== fuer || !orte.length) return;   // inzwischen andere Route
+      strassenLauf = strassenLaufBauen(orte);
       hinweise.forEach(function (h) {
         var best = null, bd = Infinity;
         orte.forEach(function (o) {
           var d = abstand(h.ort, o.ort);
           if (d < 40 && d < bd) { bd = d; best = o; }
         });
+        // Biegt OSRM an derselben Kreuzung anders ab, gehoeren Spuren und
+        // Name zu SEINEM Weg - dann lieber keine
+        if (best && !schrittPasst(best, h)) best = null;
         if (best) {
+          h.strasse = { name: best.name, ref: best.ref, ziele: best.ziele, ausfahrt: best.ausfahrt };
+        } else if (h.s != null) {
+          var nach = strasseBei(h.s + 60);
+          h.strasse = nach ? { name: nach.name, ref: '', ziele: '', ausfahrt: '' } : null;
+        }
+        if (best && best.spuren) {
           h.spuren = best.spuren;
           // "rechts einordnen" in die Ansage, wenn die gueltigen Spuren
           // eindeutig auf einer Seite liegen und es was zum Einordnen gibt
@@ -1872,6 +2113,7 @@
           }
         }
       });
+      if (standort) sicher(bannerAktualisieren, standort);
     });
   }
 
@@ -1903,6 +2145,8 @@
   // vergleichbar. Ergebnis: [{ idx: Endpunkt, hw: highway-Wert }] in
   // Fahrtrichtung.
   function strassenArten(v) {
+    if (v.abschnitte !== undefined) return v.abschnitte;
+    v.abschnitte = null;
     var m = v.messages;
     if (!m || m.length < 2) return null;
     var kopf = m[0];
@@ -1916,10 +2160,21 @@
       while (k < n && (Math.round(v.koord[k][1] * 1e6) !== lon ||
                        Math.round(v.koord[k][0] * 1e6) !== lat)) k++;
       if (k >= n) continue;               // nicht gefunden - Zeile auslassen
-      raus.push({ idx: k, hw: (/highway=(\S+)/.exec(m[r][iT] || '') || [])[1] || '' });
+      var tags = tagsAus(m[r][iT]);
+      raus.push({ idx: k, hw: tags.highway || '', limit: limitAus(tags) });
       j = k + 1;
     }
-    return raus.length ? raus : null;
+    v.abschnitte = raus.length ? raus : null;
+    return v.abschnitte;
+  }
+  // "highway=primary maxspeed=50" -> { highway: 'primary', maxspeed: '50' }
+  function tagsAus(text) {
+    var tags = {};
+    String(text || '').split(' ').forEach(function (p) {
+      var j = p.indexOf('=');
+      if (j > 0) tags[p.slice(0, j)] = p.slice(j + 1);
+    });
+    return tags;
   }
   // Strassenart des Abschnitts, der am Routenpunkt `bis` endet
   function wegBis(arten, bis) {
@@ -1980,17 +2235,41 @@
     return liste;
   }
 
+  // "4,2 km" / "650 m" - beim Naeherkommen in immer feineren Schritten
+  function wegText(m) {
+    if (m < 300) return Math.round(m / 10) * 10 + ' m';
+    if (m < 975) return Math.round(m / 50) * 50 + ' m';
+    return (m / 1000).toFixed(m < 9950 ? 1 : 0).replace('.', ',') + ' km';
+  }
+  function sprechWeg(m) {
+    if (m < 300) return Math.round(m / 10) * 10 + ' Metern';
+    if (m < 975) return Math.round(m / 50) * 50 + ' Metern';
+    return (m / 1000).toFixed(1).replace('.', ',') + ' Kilometern';
+  }
+
+  // Strassenname zum Vorlesen: "Stuttgarter Str." -> "die Stuttgarter
+  // Straße", "B 27" -> "die B 27". Wo der Artikel nicht sicher ist, kommt
+  // null - dann sagt die Ansage den Namen lieber gar nicht.
+  function mitArtikel(n) {
+    if (!n) return null;
+    if (/^[A-Z]{1,2} ?\d/.test(n)) return 'die ' + n;
+    n = n.replace(/([Ss])tr\.(?=\s|$)/g, '$1traße');
+    if (/(straße|allee|gasse|steige|staffel|brücke|chaussee|promenade|halde)$/i.test(n)) return 'die ' + n;
+    if (/(weg|platz|ring|damm|steg|pfad|graben|markt|wall)$/i.test(n)) return 'den ' + n;
+    return null;
+  }
+
   function bannerAktualisieren(ll) {
     var banner = $('banner');
-    if (!hinweise.length || !ziel) { banner.hidden = true; return; }
+    if (!ziel || !routePunkte.length) { banner.hidden = true; return; }
 
     // Entfernung zum naechsten Hinweis ENTLANG der Strecke. Die Luftlinie
     // taeuscht in Kurven, Rampen und Schleifen: dort war ein spaeterer
     // Hinweis schon "nah", der Banner zeigte das Falsche und "Jetzt rechts
     // abbiegen" kam bei Tempo 160 ueber 500 m zu frueh.
     var beste = null, besteD = Infinity;
-    var pos = lotAufStrecke(ll);
-    if (pos && pos.d < 150) {
+    var pos = lotAufStrecke(ll), aufStrecke = !!pos && pos.d < 150;
+    if (aufStrecke) {
       for (var i = 0; i < hinweise.length; i++) {
         if (gesagt['weg' + i] || hinweise[i].s == null) continue;
         var rest = hinweise[i].s - pos.s;
@@ -2008,31 +2287,62 @@
     }
 
     var zumZiel = abstand(ll, ziel);
+    banner.hidden = false;
     if (zumZiel < 60) {
-      banner.hidden = false;
       banner.classList.add('gleich');
-      $('banner-pfeil').style.transform = 'rotate(0deg)';
+      $('banner-pfeil').textContent = '🏁';
+      $('banner-pfeil').style.transform = 'none';
       $('banner-entfernung').textContent = 'Ziel';
       $('banner-anweisung').textContent = zielName.split(',')[0] || 'erreicht';
-      $('banner-danach').hidden = true;
+      ['banner-strasse', 'banner-danach', 'banner-spuren', 'banner-aktuell'].forEach(function (id) { $(id).hidden = true; });
       if (!gesagt.ziel) { gesagt.ziel = true; sagen('Ziel erreicht'); }
       return;
     }
 
-    if (beste === null || besteD > 1500) { banner.hidden = true; return; }
+    // "noch 3,1 km auf B 27" - aus dem Strassenverlauf (OSRM-Namen auf
+    // unserer Route); unbekannt -> Zeile weg
+    var hier = aufStrecke && pos.d < 40 ? strasseBei(pos.s) : null;
+    $('banner-aktuell').hidden = !(hier && hier.rest >= 200);
+    if (hier) $('banner-aktuell').textContent = 'noch ' + wegText(hier.rest) + ' auf ' + hier.name;
+
+    // Keine Abbiegung mehr bis zum Ziel: der Banner bleibt trotzdem stehen
+    // und zaehlt zum Ziel herunter
+    if (beste === null) {
+      var bisZiel = aufStrecke ? Math.max(0, kumWeg[kumWeg.length - 1] - pos.s) : zumZiel;
+      banner.classList.remove('gleich');
+      $('banner-pfeil').textContent = '🏁';
+      $('banner-pfeil').style.transform = 'none';
+      $('banner-entfernung').textContent = 'in ' + wegText(bisZiel);
+      $('banner-anweisung').textContent = 'Ziel · ' + (zielName.split(',')[0] || 'erreicht');
+      ['banner-strasse', 'banner-danach', 'banner-spuren'].forEach(function (id) { $(id).hidden = true; });
+      return;
+    }
+
     var h = hinweise[beste];
     if (besteD < 18) gesagt['weg' + beste] = true;
 
-    banner.hidden = false;
-    banner.classList.toggle('gleich', besteD < Math.max(120, tempoKmh * 2));
+    // Unter 300 m (bei Tempo mehr) gross und orange
+    banner.classList.toggle('gleich', besteD < Math.max(modus === 'rad' ? 120 : 300, tempoKmh * 3));
     $('banner-pfeil').textContent = h.kreis ? '↻' : '↑';
     $('banner-pfeil').style.transform =
       h.kreis ? 'none' : 'rotate(' + Math.max(-135, Math.min(135, h.winkel)) + 'deg)';
-    $('banner-entfernung').textContent =
-      besteD < 30 ? 'jetzt' :
-      besteD < 999 ? Math.round(besteD / 10) * 10 + ' m'
-                   : (besteD / 1000).toFixed(1) + ' km';
+    $('banner-entfernung').textContent = besteD < 30 ? 'jetzt' : 'in ' + wegText(besteD);
     $('banner-anweisung').textContent = h.text;
+
+    // Wohin es geht: "auf B 27 Richtung Stuttgart", "Ausfahrt 12 · Richtung
+    // Herrenberg". Bleibt man auf derselben Strasse, faellt "auf ..." weg.
+    // Verglichen wird mit der Strasse kurz VOR dem Manoever - nicht mit der
+    // unter dem Auto, die wechselt im letzten Moment schon zur neuen.
+    var st = h.strasse, neuName = st ? strassenName(st) : '';
+    var davor = h.s != null ? strasseBei(Math.max(0, h.s - 60)) : hier;
+    if (davor && neuName === davor.name) neuName = '';
+    var zeile = [];
+    if (st && st.ausfahrt) zeile.push('Ausfahrt ' + st.ausfahrt);
+    if (neuName) zeile.push('auf ' + neuName);
+    if (st && st.ziele) zeile.push('Richtung ' + st.ziele);
+    $('banner-strasse').hidden = !zeile.length;
+    $('banner-strasse').textContent = zeile.join(' · ').replace(' · Richtung', ' Richtung');
+
     $('banner-danach').hidden = !h.danach;
     if (h.danach) $('banner-danach').textContent = 'dann ' + h.danach;
 
@@ -2050,22 +2360,41 @@
     } else leiste.hidden = true;
 
     // Zweimal ansagen: mit Vorlauf zum Einordnen, und kurz davor.
-    // Bei "halten" steckt die Seite schon in der Ansage
+    // Bei "halten" steckt die Seite schon in der Ansage. Der Strassenname
+    // kommt nur in die erste Ansage - "Jetzt" bleibt kurz.
     var anhang = (h.einordnen && !/halten/.test(h.text) ? ', ' + h.einordnen : '') +
                  (h.danach ? ', dann ' + h.danach : '');
     if (besteD < Math.max(modus === 'rad' ? 110 : 250, tempoKmh * 4.5) && !gesagt['ton' + beste]) {
       gesagt['ton' + beste] = true;
-      sagen('In ' + Math.round(besteD / 10) * 10 + ' Metern ' + h.text + anhang);
+      var wohin = neuName ? mitArtikel(neuName) : null;
+      var text = h.text.replace(' – ', ', ');
+      if (wohin) text = text.replace(/ abbiegen$/, '') + ' auf ' + wohin;
+      else if (st && st.ziele) text += ' Richtung ' + st.ziele.split(',')[0];
+      sagen('In ' + sprechWeg(besteD) + ' ' + text + anhang);
     } else if (besteD < Math.max(60, tempoKmh * 1.2) && !gesagt['jetzt' + beste]) {
       gesagt['jetzt' + beste] = true;
-      sagen('Jetzt ' + h.text + anhang);
+      sagen('Jetzt ' + h.text.replace(' – ', ', ') + anhang);
     }
+  }
+
+  // Banner-Hoehe als CSS-Variable: die Fahnen darunter rutschen genau so
+  // weit, wie der Banner gerade hoch ist (mit Strasse, Spuren, "dann ...")
+  function bannerHoeheMelden() {
+    var b = $('banner');
+    function melden() {
+      document.documentElement.style.setProperty('--banner-h', (b.hidden ? 0 : b.offsetHeight) + 'px');
+    }
+    if (window.ResizeObserver) new ResizeObserver(melden).observe(b);
+    melden();
   }
 
   // Neuberechnung wie bei den grossen Navis - aber erst nach drei Messungen
   // abseits, damit ein GPS-Ausreisser nicht gleich eine neue Route auslöst.
   function abweichungPruefen(ll) {
     if (!routePunkte.length) return;
+    // Bei grob ungenauem Standort (Tunnel, Haeuserschlucht) nicht als
+    // "abseits" zaehlen - sonst springt die Route bei jedem Ausreisser
+    if (genauigkeit > 80) return;
     // 50 m sind auf Landstrassen und bei ungenauem GPS schnell erreicht;
     // zusammen mit 12 s Pause fuehrte das zu staendigem Neuberechnen, das sich
     // wie "hin und her schalten" anfuehlt. 70 m und 40 s Ruhe sind stabil,
@@ -2211,12 +2540,24 @@
   }
   function folgenSetzen(an) {
     folgen = an;
-    schalter('k-folgen', an);
+    folgenKnopf();
+    // Jedes Abschalten zaehlt als Beruehrung - die Wache wartet dann erst
+    // WIEDER_FOLGEN ab, bevor sie von selbst einrastet
+    if (!an) kartenBeruehrt = Date.now();
     fahrmodusAnwenden();
     if (an && standort) {
+      zoomStufe = 0;                      // Tempozoom wieder anwenden
       if (fahrmodus && kurs !== null) folgeAnsicht(standort);
       else karte.easeTo({ center: m(standort), zoom: Math.max(karte.getZoom(), 16) });
     }
+  }
+  // Der Knopf zeigt den Zustand mit Wort UND Farbe: blau "Folgt ✓" oder
+  // orange "Folgen ◎" - bisher war nur das Blau weg, das sah man im Auto nicht.
+  function folgenKnopf() {
+    var k = $('k-folgen');
+    k.classList.toggle('an', folgen);
+    k.classList.toggle('los', !folgen);
+    k.textContent = folgen ? 'Folgt ✓' : 'Folgen ◎';
   }
   function sheetZeigen(an) {
     $('sheet').hidden = !an;
@@ -2224,7 +2565,14 @@
   }
 
   function knoepfeAktivieren() {
-    $('k-folgen').onclick = function () { folgenSetzen(!folgen); };
+    // Tippen rastet IMMER ein, schaltet nie ab (abschalten tut das
+    // Verschieben der Karte). Als Umschalter schaltete das zweite Tippen
+    // ("folgt der nicht?") das Folgen gerade aus. Haengt das GPS, wird die
+    // Abfrage gleich mit neu gestartet.
+    $('k-folgen').onclick = function () {
+      folgenSetzen(true);
+      if (Date.now() - letzteMeldung > 5000 && Date.now() - gpsNeustart > 3000) standortStarten();
+    };
 
     $('k-sprache').onclick = function () {
       sprache = !sprache;
@@ -2462,7 +2810,8 @@
     try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
 
     kartenAufbau();
-    schalter('k-folgen', true);
+    folgenKnopf();
+    bannerHoeheMelden();
     schalter('k-sprache', sprache);
     schalter('s-nacht', nacht);   $('s-nacht').textContent   = nacht ? 'an' : 'aus';
     schalter('s-blitzer', blitzWarnen); $('s-blitzer').textContent = blitzWarnen ? 'an' : 'aus';
@@ -2487,6 +2836,16 @@
     sucheAktivieren();
     knoepfeAktivieren();
     standortStarten();
+    setInterval(gpsWache, 2000);
+    // Zurueck in der App (nach Spotify, Bildschirmsperre): kam seit ein paar
+    // Sekunden nichts mehr, die Positionsabfrage gleich neu starten, statt
+    // auf die Wache zu warten
+    function zurueck() {
+      if (document.visibilityState === 'visible' && letzteMeldung &&
+          Date.now() - letzteMeldung > 3000) standortStarten();
+    }
+    document.addEventListener('visibilitychange', zurueck);
+    window.addEventListener('pageshow', zurueck);
     wachHalten();
     profilBesorgen(false);
     verkehrTaktStarten();
@@ -2511,7 +2870,10 @@
         if (ziel) route();
       },
       zustand: function () { return { fahrmodus: fahrmodus, folgen: folgen,
-        zielDa: !!ziel, kurs: kurs, tempo: Math.round(tempoKmh) }; },
+        zielDa: !!ziel, kurs: kurs, tempo: Math.round(tempoKmh),
+        varianten: varianten.length, limit: limitAktuell,
+        gpsStill: letzteMeldung ? Date.now() - letzteMeldung : null,
+        strassenLauf: strassenLauf ? strassenLauf.laeufe.length : 0 }; },
       profil: function () { return profilId; }
     };
   }
