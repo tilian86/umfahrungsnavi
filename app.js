@@ -657,8 +657,16 @@
     var erste = !standort;
     standort = ll;
     genauigkeit = p.coords.accuracy || 0;
-    if (typeof p.coords.heading === 'number' && !isNaN(p.coords.heading) && p.coords.speed > 1) {
-      kurs = p.coords.heading;
+    // Kurs erst ab 2,5 m/s: beim Rangieren und Rueckwaerts-Ausparken meldet
+    // das iPhone die Bewegungsrichtung - rueckwaerts. Die Karte stand dann
+    // "falsch herum" und blieb so bis zum Losfahren. Langsam auf der Route
+    // gilt deshalb die Richtung der Strecke.
+    var v = p.coords.speed || 0, h = p.coords.heading;
+    var lp = (fahrmodus && routePunkte.length > 1) ? lotAufStrecke(ll) : null;
+    if (lp && lp.d < 25 && v < 4) {
+      kurs = window.Verkehr.peilung(routePunkte[lp.idx - 1], routePunkte[lp.idx]);
+    } else if (typeof h === 'number' && !isNaN(h) && h >= 0 && v > 2.5) {
+      kurs = h;
     }
     // iOS meldet -1, solange es das Tempo nicht kennt
     tempoKmh = Math.max(0, (p.coords.speed || 0) * 3.6);
@@ -674,6 +682,9 @@
     if (ziel && routePunkte.length) {
       [bannerAktualisieren, blitzPruefen, abweichungPruefen, fahrdatenZeigen,
        durchfahrenPruefen, alternativenRaeumen].forEach(function (f) { sicher(f, ll); });
+      if (blitzBisS && lotS > blitzBisS - 5000) sicher(blitzerNachladen);
+      if (naviNeu) { naviNeu = false; letzteNeu = Date.now(); abseitsZaehler = 0; route(); }
+      else sicher(naviGesagtMelden);
     }
     sicher(tempoEcke, ll);
   }
@@ -1105,6 +1116,25 @@
     route();
   }
 
+  // Feste Blitzer fuer die naechsten 25 km ab dem Standort. Naehert man sich
+  // dem Ende des geladenen Stuecks, kommt das naechste dazu - vorher gab es
+  // nach km 25 keine Warnung mehr.
+  var blitzBisS = 0;
+  function blitzerNachladen(melden) {
+    if (modus !== 'auto' || !routePunkte.length) return;
+    var pos = standort ? lotAufStrecke(standort) : null;
+    if (pos && pos.d > 150) pos = null;
+    var fuer = routePunkte;
+    blitzBisS = (pos ? pos.s : 0) + 25000;   // sofort: bei Fehlern keine Anfrage-Flut
+    window.Verkehr.blitzerLaden(routePunkte.slice(pos ? pos.idx - 1 : 0), 25).then(function (b) {
+      if (routePunkte !== fuer) return;      // inzwischen andere Route
+      blitzer = b;
+      blitzerZeichnen();
+      naviMelden();
+      if (melden && b.length) info($('status').textContent + ' · ' + b.length + ' Blitzer');
+    });
+  }
+
   function verkehrTaktStarten() {
     clearInterval(verkehrTimer);
     // Alle drei Minuten. Häufiger lohnt nicht - Staumeldungen ändern sich
@@ -1227,7 +1257,8 @@
 
   function zielLoeschen() {
     ziel = null; zielName = ''; varianten = []; hinweise = [];
-    routePunkte = []; routeRefs = []; blitzer = [];
+    routePunkte = []; routeRefs = []; blitzer = []; blitzBisS = 0;
+    naviMelden();
     if (zielMarke) { zielMarke.remove(); zielMarke = null; }
     routenZeichnen();
     blitzerZeichnen();
@@ -1318,9 +1349,13 @@
       var wege = radfahrt ? '' :
         (feldwegeFrei ? '&profile:feldwege_frei=1' : '') +
         (schotterOk ? '&profile:schotter_ok=1' : '');
+      // Unterwegs die Fahrtrichtung mitgeben: sonst beginnt die Route nach
+      // einer Abweichung gern hinter dem Auto ("hinten herum"), ohne Ansage
+      // zum Wenden - und nach 40 s heisst es wieder "neu berechnet".
+      var richtung = (fahrmodus && kurs !== null && tempoKmh > 10) ? '&heading=' + Math.round(kurs) : '';
       function hole(k) {
         return hol(BROUTER + '?lonlats=' + ll + '&profile=' + (k.profil || prof) +
-                   '&format=geojson&timode=2' + k.zusatz + wege +
+                   '&format=geojson&timode=2' + richtung + k.zusatz + wege +
                    (k.nogos != null ? k.nogos : nogos), 20000)
           .then(function (r) {
             if (!r.ok) {
@@ -1793,6 +1828,8 @@
     // links abbiegen"), weil die Marken sonst komplett geleert werden.
     var alteHinweise = hinweise, altesGesagt = gesagt;
     gesagt = {};
+    // Blitzer haengen am Ort, nicht an der Route: schon gewarnt bleibt gewarnt
+    Object.keys(altesGesagt).forEach(function (k) { if (k.indexOf('blitz') === 0) gesagt[k] = true; });
     hinweise = hinweiseBauen(v);
     // Wo auf der Strecke liegt jeder Hinweis (Meter ab Start)? Daran misst
     // der Banner den Weg bis zur Abbiegung - nicht an der Luftlinie.
@@ -1820,6 +1857,7 @@
          ' · ' + (v.min + stau) + ' min' + (stau ? ' (+' + stau + ' Stau)' : '') +
          ' · ' + v.km.toFixed(1) + ' km' + zusatz);
     if (standort) bannerAktualisieren(standort);
+    naviMelden();
   }
 
   // Nach einer neuen Route die Umgebung nachladen: feste Blitzer im Korridor
@@ -1829,11 +1867,7 @@
   // und Overpass sperrt einen aus.
   function umgebungNachladen(v) {
     if (!v) return;                       // Filter hat alles verworfen
-    if (modus === 'auto') window.Verkehr.blitzerLaden(routePunkte, 25).then(function (b) {
-      blitzer = b;
-      blitzerZeichnen();
-      if (b.length) info($('status').textContent + ' · ' + b.length + ' Blitzer');
-    });
+    if (modus === 'auto') blitzerNachladen(true);
     // Kurz warten: direkt davor lief die Adresssuche ueber denselben Dienst,
     // und Nominatim drosselt bei zwei Anfragen in derselben Sekunde.
     // Die Kennungen gehoeren zur gewaehlten Strecke. Ist inzwischen eine
@@ -2108,12 +2142,15 @@
           if (n >= 3) {
             var gueltig = [];
             best.spuren.forEach(function (sp, i) { if (sp.an) gueltig.push(i); });
-            if (gueltig.length && gueltig[0] >= n - gueltig.length) h.einordnen = 'rechts einordnen';
-            else if (gueltig.length && gueltig[gueltig.length - 1] < gueltig.length) h.einordnen = 'links einordnen';
+            if (gueltig.length && gueltig.length < n) {
+              if (gueltig[0] >= n - gueltig.length) h.einordnen = 'rechts einordnen';
+              else if (gueltig[gueltig.length - 1] < gueltig.length) h.einordnen = 'links einordnen';
+            }
           }
         }
       });
       if (standort) sicher(bannerAktualisieren, standort);
+      naviMelden();
     });
   }
 
@@ -2253,6 +2290,7 @@
   function mitArtikel(n) {
     if (!n) return null;
     if (/^[A-Z]{1,2} ?\d/.test(n)) return 'die ' + n;
+    if (/^(Am|An|Auf|Im|In|Zum|Zur|Unter|Hinter|Vor|Beim?|Über)\s/.test(n)) return null;
     n = n.replace(/([Ss])tr\.(?=\s|$)/g, '$1traße');
     if (/(straße|allee|gasse|steige|staffel|brücke|chaussee|promenade|halde)$/i.test(n)) return 'die ' + n;
     if (/(weg|platz|ring|damm|steg|pfad|graben|markt|wall)$/i.test(n)) return 'den ' + n;
@@ -2333,9 +2371,7 @@
     // Herrenberg". Bleibt man auf derselben Strasse, faellt "auf ..." weg.
     // Verglichen wird mit der Strasse kurz VOR dem Manoever - nicht mit der
     // unter dem Auto, die wechselt im letzten Moment schon zur neuen.
-    var st = h.strasse, neuName = st ? strassenName(st) : '';
-    var davor = h.s != null ? strasseBei(Math.max(0, h.s - 60)) : hier;
-    if (davor && neuName === davor.name) neuName = '';
+    var st = h.strasse, neuName = neuerName(h, hier);
     var zeile = [];
     if (st && st.ausfahrt) zeile.push('Ausfahrt ' + st.ausfahrt);
     if (neuName) zeile.push('auf ' + neuName);
@@ -2362,19 +2398,88 @@
     // Zweimal ansagen: mit Vorlauf zum Einordnen, und kurz davor.
     // Bei "halten" steckt die Seite schon in der Ansage. Der Strassenname
     // kommt nur in die erste Ansage - "Jetzt" bleibt kurz.
-    var anhang = (h.einordnen && !/halten/.test(h.text) ? ', ' + h.einordnen : '') +
-                 (h.danach ? ', dann ' + h.danach : '');
     if (besteD < Math.max(modus === 'rad' ? 110 : 250, tempoKmh * 4.5) && !gesagt['ton' + beste]) {
       gesagt['ton' + beste] = true;
-      var wohin = neuName ? mitArtikel(neuName) : null;
-      var text = h.text.replace(' – ', ', ');
-      if (wohin) text = text.replace(/ abbiegen$/, '') + ' auf ' + wohin;
-      else if (st && st.ziele) text += ' Richtung ' + st.ziele.split(',')[0];
-      sagen('In ' + sprechWeg(besteD) + ' ' + text + anhang);
+      sagen('In ' + sprechWeg(besteD) + ' ' + ansageTexte(h, neuName).ton);
     } else if (besteD < Math.max(60, tempoKmh * 1.2) && !gesagt['jetzt' + beste]) {
       gesagt['jetzt' + beste] = true;
-      sagen('Jetzt ' + h.text.replace(' – ', ', ') + anhang);
+      sagen(ansageTexte(h, neuName).jetzt);
     }
+  }
+
+  // Wohin es geht - verglichen mit der Strasse kurz VOR dem Manoever, nicht
+  // mit der unter dem Auto (die wechselt im letzten Moment schon zur neuen).
+  // Bleibt man auf derselben Strasse: ''.
+  function neuerName(h, hier) {
+    var st = h.strasse, neuName = st ? strassenName(st) : '';
+    var davor = h.s != null ? strasseBei(Math.max(0, h.s - 60)) : hier;
+    if (davor && neuName === davor.name) neuName = '';
+    return neuName;
+  }
+
+  // Die beiden Ansagen zu einem Hinweis: ton mit Vorlauf (ohne "In 300
+  // Metern"), jetzt kurz davor. Der Strassenname kommt nur in die erste.
+  // Bei "halten" steckt die Seite schon in der Ansage.
+  function ansageTexte(h, neuName) {
+    var st = h.strasse;
+    var anhang = (h.einordnen && !/halten/.test(h.text) ? ', ' + h.einordnen : '') +
+                 (h.danach ? ', dann ' + h.danach : '');
+    var wohin = neuName ? mitArtikel(neuName) : null;
+    var text = h.text.replace(' – ', ', ');
+    if (wohin) text = text.replace(/ abbiegen$/, '') + ' auf ' + wohin;
+    else if (st && st.ziele) text += ' Richtung ' + st.ziele.split(',')[0];
+    return { ton: text + anhang, jetzt: 'Jetzt ' + h.text.replace(' – ', ', ') + anhang };
+  }
+
+  /* ------------------------------------- Hintergrund-Navi (App „Werkstatt“) */
+  // In der iPhone-App „Werkstatt“ schlaeft auch diese Seite bei gesperrtem
+  // Bildschirm ein. Dann spricht die App selbst weiter - mit denselben Texten
+  // und Schwellen (NaviKern.swift). Dafuer bekommt sie die fertige Route samt
+  // Ansagetexten. Im Browser und als Home-Symbol fehlt funkNativ.navi: dort
+  // aendert sich nichts.
+  var naviNativ = !!(window.funkNativ && window.funkNativ.navi);
+  var naviTimer = null, naviGesagtZahl = -1, naviNeu = false;
+  function naviMelden() {
+    if (!naviNativ) return;
+    clearTimeout(naviTimer);
+    naviTimer = setTimeout(function () {
+      naviTimer = null;
+      var n = window.funkNativ.navi;
+      if (!ziel || !routePunkte.length || !sprache) { n.ende().catch(function () {}); return; }
+      naviGesagtZahl = Object.keys(gesagt).length;
+      n.route({
+        punkte: routePunkte,
+        hinweise: hinweise.map(function (h) {
+          var t = ansageTexte(h, neuerName(h, null));
+          return { s: h.s, ort: h.ort, ton: t.ton, jetzt: t.jetzt };
+        }),
+        blitzer: blitzer.map(function (b) {
+          return { ort: b.ort, mobil: !!b.mobil, tempo: b.tempo || null, richtung: b.richtung || [] };
+        }),
+        limits: (abschnitte || []).map(function (a) { return { idx: a.idx, limit: a.limit || null }; }),
+        ziel: ziel,
+        stopps: stopps.map(function (sp) { return sp.ort; }),
+        rad: modus === 'rad',
+        blitzWarnen: blitzWarnen,
+        gesagt: Object.keys(gesagt)
+      }).catch(function () {});
+    }, 800);
+  }
+  // Was die Seite schon gesagt hat, soll die App nicht wiederholen
+  function naviGesagtMelden() {
+    if (!naviNativ || naviTimer) return;
+    var k = Object.keys(gesagt);
+    if (k.length === naviGesagtZahl) return;
+    naviGesagtZahl = k.length;
+    window.funkNativ.navi.gesagt(k).catch(function () {});
+  }
+  // Zurueck auf der Seite: uebernehmen, was die App inzwischen gesagt hat.
+  // Hat sie selbst neu berechnet, rechnet die Seite mit der naechsten
+  // (frischen) Position auch neu.
+  function naviStand(m) {
+    if (m.umgeleitet) { naviNeu = true; return; }
+    (m.gesagt || []).forEach(function (k) { gesagt[k] = true; });
+    naviGesagtZahl = Object.keys(gesagt).length;
   }
 
   // Banner-Hoehe als CSS-Variable: die Fahnen darunter rutschen genau so
@@ -2426,6 +2531,7 @@
 
   function sagen(t) {
     if (!sprache || !('speechSynthesis' in window) || t === letzterText) return;
+    if (naviNativ && document.hidden) return;   // hinten spricht die App (NaviKern)
     letzterText = t;
     tonSitzung();
     var u = new SpeechSynthesisUtterance(t);
@@ -2582,6 +2688,7 @@
         // Die erste Ausgabe muss aus einer Nutzergeste kommen, sonst blockt iOS.
         letzterText = ''; sagen('Ansage an');
       } else window.speechSynthesis.cancel();
+      naviMelden();
     };
 
     $('k-stopp').onclick = function () {
@@ -2633,6 +2740,7 @@
       merken('blitzer', blitzWarnen ? '1' : '0');
       blitzerZeichnen();
       if (!blitzWarnen) $('blitzfahne').hidden = true;
+      naviMelden();
     };
 
     $('s-musik').onclick = function () {
@@ -2777,6 +2885,7 @@
 
   /* ------------------------------------------------------------------ Start */
   function start() {
+    if (naviNativ && window.__funk) window.__funk.an('navi.stand', naviStand);
     nacht       = geholt('nacht', '0') === '1';
     blitzWarnen = geholt('blitzer', '1') === '1';
     verkehrAn   = geholt('verkehr', '1') === '1';

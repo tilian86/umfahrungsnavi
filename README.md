@@ -73,6 +73,24 @@ beim ersten Start selbst zu BRouter hoch und merkt sich die Kennung.
 
 ## Änderungen
 
+**v34 (06.10.2026)** — Code-Review und Hintergrund-Navi:
+- Blitzer kommen jetzt über die ganze Strecke: vorher nur für die ersten 25 km,
+  jetzt wird unterwegs nachgeladen.
+- Fahrtrichtung beim Rangieren und Rückwärtsfahren: unter 4 m/s auf der Route
+  zählt die Richtung der Strecke, nicht der wackelige GPS-Kurs.
+- Neuberechnung unterwegs übergibt BRouter die Fahrtrichtung (`heading`), damit
+  die neue Route nicht hinter einem beginnt.
+- Spurhinweis („links einordnen") nur, wenn wirklich nicht alle Spuren passen.
+- „auf die Am Stadtgraben" → „auf Am Stadtgraben" (Straßennamen mit Präposition).
+- Blitzer wurden nach einer Neuberechnung doppelt angesagt.
+- **Werkstatt-App:** Wer Staufunk als Kachel in der Werkstatt-App nutzt, bekommt
+  die Ansagen auch bei gesperrtem Bildschirm. Staufunk schickt der App dafür die
+  Route samt Ansagetexten (`funkNativ.navi`), die App fährt mit eigenem GPS mit
+  (Code: `zentrale-ios/Zentrale/Web/NaviKern.swift`). Die Schwellen und Texte
+  stehen an beiden Stellen: **Ändern in `bannerAktualisieren`, `blitzPruefen`,
+  `abweichungPruefen`, `tempoEcke` oder `osrmHinweise` → dort nachziehen.**
+  Als Web-App oder im Browser ändert sich nichts.
+
 **v30 (24.09.2026)** — Fehler aus dem Code-Review behoben:
 - Umfahrung hält: Sperren fielen nach 1,5 s wieder weg, die Route kehrte
   mitten in den Stau zurück. Jetzt erst, wenn der Stau selbst weg ist.
