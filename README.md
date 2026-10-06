@@ -73,6 +73,28 @@ beim ersten Start selbst zu BRouter hoch und merkt sich die Kennung.
 
 ## Änderungen
 
+**v36 (06.10.2026)** — nach der ersten Testfahrt (Rottenburg):
+- **Navigationsmodus:** Beim Fahren verschwinden Zielfeld, Vorschlagskacheln und
+  Stoppliste (`naviModusPruefen`, Klasse `navi` am body). Unten bleiben
+  Ankunftszeile und Knöpfe; ein Tipp auf die Ankunftszeile holt alles für 15 s
+  zurück, „Übersicht“ sowieso.
+- **GPS-Sprünge:** grobe Funkzellen-Schätzungen (±50 m+, solange vor < 15 s eine
+  gute Position kam), Sprünge über 250 km/h und alte Positionen (> 15 s) werden
+  verworfen (`positionTaugt`); Fahne „GPS ungenau – Position gehalten“. Auf der
+  Route rastet der Punkt auf die Linie ein (nur Anzeige). Dauerhaft ±300 m+ →
+  Hinweis auf „Genauer Standort“.
+- **Tempo/Richtung aus der Bewegung**, wenn das iPhone keins meldet – sonst
+  blieben die Vorschläge stehen (alternativenRaeumen braucht ≥ 12 km/h).
+- **Straßennamen:** OSRM bekommt Stützpunkte entlang unserer Route
+  (`stuetzpunkte`, `waypoints=0;n`, Mitte von Abschnitten ≥ 40 m mit Richtung) und
+  fährt damit denselben Weg – vorher fehlten die Namen überall, wo OSRM anders
+  gefahren wäre. Klappt das nicht, wie früher ohne Stützpunkte.
+- **Fahrt überlebt Neuladen** (`fahrtMerken`/`fahrtHolen`, Speicher `un-fahrt`,
+  30 Min ohne Fahrt → vergessen). Ohne gemerkte Fahrt beendet die Seite beim Start
+  eine noch laufende Hintergrund-Navi der App.
+- Einstellungen: „📋 Hintergrund-Protokoll“ (nur in der Werkstatt-App) zeigt und
+  kopiert das Fahrtenbuch der App-Navi.
+
 **v34 (06.10.2026)** — Code-Review und Hintergrund-Navi:
 - Blitzer kommen jetzt über die ganze Strecke: vorher nur für die ersten 25 km,
   jetzt wird unterwegs nachgeladen.

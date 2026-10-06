@@ -10,12 +10,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Staufunk">
-  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=34">
+  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=36">
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <link rel="manifest" href="manifest.json">
   <title>Staufunk</title>
-  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=34">
-  <link rel="stylesheet" href="stil.css?v=34">
+  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=36">
+  <link rel="stylesheet" href="stil.css?v=36">
 </head>
 <body>
 
@@ -150,6 +150,12 @@
 
     <a class="kompass-link" href="kompass.html">🧭 Kompass prüfen — verdreht die Halterung die Richtung?</a>
 
+    <!-- nur in der App „Werkstatt“: was die Hintergrund-Navi erlebt hat -->
+    <div id="s-protokoll-teil" hidden>
+      <div class="knopfreihe"><button id="s-protokoll">📋 Hintergrund-Protokoll zeigen &amp; kopieren</button></div>
+      <pre id="s-protokoll-text" hidden></pre>
+    </div>
+
     <div class="knopfreihe">
       <button id="k-stopp">Zwischenziel setzen</button>
       <button id="s-stau">Stau von Hand setzen</button>
@@ -160,11 +166,11 @@
     </div>
   </div>
 
-  <script src="vendor/maplibre/maplibre-gl.js?v=34"></script>
-  <script src="verkehr.js?v=34"></script>
+  <script src="vendor/maplibre/maplibre-gl.js?v=36"></script>
+  <script src="verkehr.js?v=36"></script>
   <!-- tut nichts, ausser die Adresse enthaelt ?pruefstand -->
-  <script src="pruefstand.js?v=34"></script>
-  <script src="app.js?v=34"></script>
+  <script src="pruefstand.js?v=36"></script>
+  <script src="app.js?v=36"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {

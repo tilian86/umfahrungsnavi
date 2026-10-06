@@ -309,6 +309,21 @@
   function fahrmodusAnwenden() {
     fahrmodus = !!(ziel && folgen);
     if (!fahrmodus) kamera({ bearing: 0, pitch: 0, padding: { top: 0 }, duration: 500 });
+    naviModusPruefen();
+  }
+
+  // Navigationsmodus: Beim Fahren braucht es kein Zielfeld, keine
+  // Vorschlagskacheln und keine Stoppliste - die nahmen ein Drittel des
+  // Bildschirms. Unten bleiben Ankunftszeile und Knoepfe. Alles kommt wieder
+  // mit "Übersicht" (Folgen aus), nach einer Neuberechnung mit Auswahl
+  // (auswahlBis) oder mit einem Tipp auf die Ankunftszeile (NAVI_OFFEN lang).
+  // Einmal losgefahren bleibt er an, auch an der Ampel.
+  var naviModus = false, naviOffenBis = 0, NAVI_OFFEN = 15000;
+  function naviModusPruefen() {
+    var jetzt = Date.now();
+    naviModus = !!(fahrmodus && ziel && routePunkte.length && jetzt >= auswahlBis &&
+                   (naviModus || tempoKmh >= 12));
+    document.body.classList.toggle('navi', naviModus && jetzt >= naviOffenBis);
   }
 
   function tempoZoom() {
@@ -651,34 +666,97 @@
     try { f(ll); } catch (e) { if (window.console) console.error(e); }
   }
 
+  // GPS-Filter gegen Spruenge "mitten in die Pampa": iOS schiebt zwischen
+  // gute GPS-Positionen immer wieder grobe Schaetzungen aus Funkzellen/WLAN
+  // (±100 m bis Kilometer) und liefert nach Tunneln alte, zwischengespeicherte
+  // Positionen. Die werden verworfen, solange vor kurzem eine gute kam. Ohne
+  // gute Position nimmt die Seite nach GPS_GROB_HALTEN auch grobe - besser
+  // als stehenzubleiben.
+  var GPS_GROB_HALTEN = 15000;
+  var gpsGut = null;                     // zuletzt angenommene: {ll, t, acc, da}
+  var gpsSprungZahl = 0, gpsGrobSeit = 0, gpsVerworfenAcc = 0;
+  var standortGezeigt = null;            // auf die Route eingerastet
+
+  function positionTaugt(ll, acc, t) {
+    var jetzt = Date.now();
+    if (jetzt - t > 15000) return false;                     // alt
+    if (!gpsGut) return true;
+    if (t <= gpsGut.t) return false;                         // doppelt
+    if (jetzt - gpsGut.da > GPS_GROB_HALTEN) return true;   // lange nichts Gutes
+    if (acc > Math.max(50, 3 * gpsGut.acc)) return false;    // grobe Schaetzung
+    // Mehr als 250 km/h (Genauigkeit abgezogen): Sprung. Dreimal hintereinander
+    // dasselbe "Springen" ist dagegen echt - dann lag eher die alte falsch.
+    var dt = (t - gpsGut.t) / 1000;
+    if (abstand(gpsGut.ll, ll) - acc - gpsGut.acc > dt * 70 && gpsSprungZahl < 3) {
+      gpsSprungZahl++;
+      return false;
+    }
+    return true;
+  }
+
+  // Punkt auf der Route zur Lotposition (fuer die Anzeige)
+  function punktAufStrecke(lp) {
+    var a = routePunkte[lp.idx - 1], b = routePunkte[lp.idx];
+    var seg = kumWeg[lp.idx] - kumWeg[lp.idx - 1];
+    var t = seg > 0 ? Math.max(0, Math.min(1, (lp.s - kumWeg[lp.idx - 1]) / seg)) : 0;
+    return [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+  }
+
   function positionNeu(p) {
     letzteMeldung = Date.now();
     var ll = [p.coords.latitude, p.coords.longitude];
+    var acc = p.coords.accuracy || 0;
+    var t = p.timestamp || Date.now();
+    if (!positionTaugt(ll, acc, t)) { gpsVerworfenAcc = acc; return; }
+    gpsSprungZahl = 0;
+    gpsVerworfenAcc = 0;
+    var vorher = gpsGut;
+    gpsGut = { ll: ll, t: t, acc: acc, da: Date.now() };
+    gpsGrobSeit = acc > 300 ? (gpsGrobSeit || Date.now()) : 0;
     var erste = !standort;
     standort = ll;
-    genauigkeit = p.coords.accuracy || 0;
+    genauigkeit = acc;
+    // Tempo und Richtung: iOS meldet -1 (bei uns null), solange es sie nicht
+    // kennt - in der App "Werkstatt" auch mal laenger. Dann aus der Bewegung
+    // seit der letzten guten Position.
+    var v = p.coords.speed, h = p.coords.heading, eigen = false;
+    if (typeof v !== 'number' || isNaN(v) || v < 0) {
+      v = null;
+      var dt = vorher ? (t - vorher.t) / 1000 : 0;
+      if (vorher && dt >= 0.5 && dt <= 10 && acc <= 30 && vorher.acc <= 30) {
+        var weg = abstand(vorher.ll, ll);
+        v = weg / dt;
+        eigen = true;
+        if (v > 2.5 && weg > 8) h = window.Verkehr.peilung(vorher.ll, ll);
+      }
+    }
     // Kurs erst ab 2,5 m/s: beim Rangieren und Rueckwaerts-Ausparken meldet
     // das iPhone die Bewegungsrichtung - rueckwaerts. Die Karte stand dann
     // "falsch herum" und blieb so bis zum Losfahren. Langsam auf der Route
     // gilt deshalb die Richtung der Strecke.
-    var v = p.coords.speed || 0, h = p.coords.heading;
     var lp = (fahrmodus && routePunkte.length > 1) ? lotAufStrecke(ll) : null;
-    if (lp && lp.d < 25 && v < 4) {
+    if (lp && lp.d < 25 && (v || 0) < 4) {
       kurs = window.Verkehr.peilung(routePunkte[lp.idx - 1], routePunkte[lp.idx]);
-    } else if (typeof h === 'number' && !isNaN(h) && h >= 0 && v > 2.5) {
+    } else if (typeof h === 'number' && !isNaN(h) && h >= 0 && (v || 0) > 2.5) {
       kurs = h;
     }
-    // iOS meldet -1, solange es das Tempo nicht kennt
-    tempoKmh = Math.max(0, (p.coords.speed || 0) * 3.6);
+    if (v === null) tempoKmh = 0;
+    else if (eigen) tempoKmh = tempoKmh * 0.5 + v * 3.6 * 0.5;   // aus Positionen: glaetten
+    else tempoKmh = v * 3.6;
+    // Auf der Route rastet der Punkt auf der Linie ein, statt neben ihr zu
+    // zittern (gerechnet wird weiter mit der echten Position)
+    var zeigen = (lp && lp.d <= Math.max(20, Math.min(acc, 50))) ? punktAufStrecke(lp) : ll;
+    standortGezeigt = zeigen;
     gpsAnzeigen(0);
-    sicher(function () { ichZeichnen(ll, p.coords.accuracy); });
+    sicher(function () { ichZeichnen(zeigen, acc); });
     if (folgen) {
       sicher(function () {
-        if (erste) karte.jumpTo({ center: m(ll), zoom: 16 });
-        else folgeAnsicht(ll);
+        if (erste) karte.jumpTo({ center: m(zeigen), zoom: 16 });
+        else folgeAnsicht(zeigen);
       });
     }
     if (erste && ziel) route();
+    if (ziel && !gesagt.ziel && Date.now() - fahrtGemerkt > 60000) fahrtMerken();
     if (ziel && routePunkte.length) {
       [bannerAktualisieren, blitzPruefen, abweichungPruefen, fahrdatenZeigen,
        durchfahrenPruefen, alternativenRaeumen].forEach(function (f) { sicher(f, ll); });
@@ -712,11 +790,20 @@
   }
 
   function gpsAnzeigen(still) {
-    var f = $('gpsfahne'), alt = still > 0;
-    f.hidden = !alt;
+    var f = $('gpsfahne'), alt = still > 0, jetzt = Date.now();
+    // Es kommen Positionen, aber nur verworfene (grob oder Spruenge)
+    var gehalten = !alt && gpsGut && gpsVerworfenAcc && jetzt - gpsGut.da > 5000;
+    // Dauerhaft grob: meist ist "Genauer Standort" fuer die App aus
+    var grob = !alt && gpsGrobSeit && jetzt - gpsGrobSeit > 20000;
+    f.hidden = !(alt || gehalten || grob);
     if (alt) f.textContent = '⚠︎ Kein GPS seit ' + Math.round(still / 1000) +
                              ' s – Standort wird neu gesucht';
-    if (ichMarke) ichMarke.getElement().classList.toggle('alt', alt);
+    else if (gehalten) f.textContent = '⚠︎ GPS ungenau (±' + Math.round(gpsVerworfenAcc) +
+                                       ' m) – Position gehalten';
+    else if (grob) f.textContent = '⚠︎ GPS sehr ungenau (±' + Math.round(genauigkeit) +
+                                   ' m) – iPhone-Einstellungen › Datenschutz › Ortungsdienste › diese App › „Genauer Standort“ an?';
+    if (ichMarke) ichMarke.getElement().classList.toggle('alt', alt || gehalten);
+    naviModusPruefen();
   }
 
   var kegelMarke = null;
@@ -744,12 +831,14 @@
   /* ------------------------------------------------------------ Zwischenziele */  /* ------------------------------------------------------------ Zwischenziele */
   function stoppHinzufuegen(lat, lon, name) {
     stopps.push({ ort: [lat, lon], name: name || ('Stopp ' + (stopps.length + 1)) });
+    fahrtMerken();
     stoppMarkenZeichnen();
     stoppListeZeichnen();
     if (ziel) route(); else info('Zwischenziel gesetzt – jetzt noch das Ziel eingeben');
   }
   function stoppEntfernen(i) {
     stopps.splice(i, 1);
+    fahrtMerken();
     stoppMarkenZeichnen(); stoppListeZeichnen();
     if (ziel) route();
   }
@@ -1241,10 +1330,34 @@
     $('suche').value = (name || '').split(',')[0];
     $('suche-loeschen').hidden = false;
     if (name && name !== 'Kartenpunkt') zielMerken(name.split(',')[0], lat, lon);
+    fahrtMerken();
     // Neues Ziel, neue Lage: Staus der alten Strecke nicht mitschleppen
     sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic');
     fahrmodusAnwenden();
     route();
+  }
+
+  // Die Fahrt ueberlebt ein Neuladen der Seite (in der App "Werkstatt"
+  // beendet iOS sie bei gesperrtem Bildschirm manchmal): Ziel und
+  // Zwischenziele liegen im Speicher und kommen beim Start zurueck - solange
+  // die Fahrt keine FAHRT_HALTEN ruht und das Ziel nicht erreicht ist.
+  var FAHRT_HALTEN = 30 * 60 * 1000, fahrtGemerkt = 0;
+  function fahrtMerken() {
+    fahrtGemerkt = Date.now();
+    merken('fahrt', ziel ? JSON.stringify({ ziel: ziel, name: zielName, stopps: stopps, t: fahrtGemerkt }) : '');
+  }
+  function fahrtHolen() {
+    var f = null;
+    try { f = JSON.parse(geholt('fahrt', '') || 'null'); } catch (e) {}
+    if (!f || !f.ziel || f.ziel.length !== 2 || Date.now() - (f.t || 0) > FAHRT_HALTEN) {
+      merken('fahrt', '');
+      // Lief in der App noch die Hintergrund-Navi weiter (Seite war weg), hier endet sie
+      if (naviNativ) window.funkNativ.navi.ende().catch(function () {});
+      return;
+    }
+    stopps = (f.stopps || []).filter(function (sp) { return sp && sp.ort && sp.ort.length === 2; });
+    stoppMarkenZeichnen(); stoppListeZeichnen();
+    zielSetzen(f.ziel[0], f.ziel[1], f.name);
   }
 
   function zielMerken(n, lat, lon) {
@@ -1258,6 +1371,7 @@
   function zielLoeschen() {
     ziel = null; zielName = ''; varianten = []; hinweise = [];
     routePunkte = []; routeRefs = []; blitzer = []; blitzBisS = 0;
+    fahrtMerken();
     naviMelden();
     if (zielMarke) { zielMarke.remove(); zielMarke = null; }
     routenZeichnen();
@@ -1981,12 +2095,78 @@
     return liste.slice(0, 2).join(', ');
   }
 
+  // Stuetzpunkte fuer OSRM. Ohne sie rechnet OSRM seinen eigenen Weg, und
+  // wo der von unserem abweicht, fehlen Strassennamen und Spuren (gemessen
+  // Rottenburg: die letzten drei Abbiegungen ohne Namen). Mit Punkten entlang
+  // UNSERER Route (waypoints: nur Durchfahrt, keine Zwischenziele) faehrt
+  // OSRM denselben Weg. Die Punkte liegen mitten auf Abschnitten ab 40 m:
+  // auf Knoten (Kreuzungen) rasteten sie auf die Querstrasse ein und OSRM
+  // drehte Schleifen (gemessen: 7,9 statt 5,3 km). Die Richtung (bearings)
+  // haelt sie auf der richtigen Fahrbahn. Je ein Punkt kurz nach jeder
+  // Abbiegung legt sie fest, dazwischen hoechstens alle FUELL Meter einer.
+  function stuetzpunkte(punkte) {
+    var n = routePunkte.length;
+    if (n < 2 || kumWeg.length !== n) return null;
+    var gesamt = kumWeg[n - 1], fuell = Math.max(800, gesamt / 70);
+    var pflicht = {};
+    hinweise.forEach(function (h) {
+      if (h.s == null || h.idx == null) return;
+      for (var i = Math.max(1, h.idx); i < n && kumWeg[i - 1] <= h.s + 400; i++) {
+        if (kumWeg[i] - kumWeg[i - 1] >= 40) { pflicht[i] = true; return; }
+      }
+    });
+    // Zwischenziele bleiben echte Wegpunkte (dort darf OSRM wenden)
+    var halte = [], ab = 0;
+    stopps.forEach(function (sp) {
+      var best = -1, bd = Infinity;
+      for (var i = ab; i < n; i++) {
+        var d = abstand(routePunkte[i], sp.ort);
+        if (d < bd) { bd = d; best = i; }
+      }
+      if (best >= 0 && bd < 300) { halte.push({ s: kumWeg[best], ort: sp.ort }); ab = best; }
+    });
+    var liste = [{ ort: punkte[0], halt: true }], letzte = 0, hi = 0;
+    for (var i = 1; i < n; i++) {
+      var len = kumWeg[i] - kumWeg[i - 1], mitte = kumWeg[i - 1] + len / 2;
+      while (hi < halte.length && halte[hi].s <= mitte) {
+        liste.push({ ort: halte[hi].ort, halt: true }); letzte = halte[hi].s; hi++;
+      }
+      if (len < 40 || mitte < 60 || mitte > gesamt - 60) continue;
+      if (!pflicht[i] && mitte - letzte < fuell) continue;
+      var a = routePunkte[i - 1], b = routePunkte[i];
+      liste.push({ ort: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2],
+                   kurs: Math.round(window.Verkehr.peilung(a, b)) });
+      letzte = mitte;
+    }
+    for (; hi < halte.length; hi++) liste.push({ ort: halte[hi].ort, halt: true });
+    liste.push({ ort: punkte[punkte.length - 1], halt: true });
+    if (liste.length - halte.length <= 2) return null;    // nichts zu stuetzen
+    var wege = [];
+    liste.forEach(function (p, i) { if (p.halt) wege.push(i); });
+    return OSRM + liste.map(function (p) { return p.ort[1].toFixed(6) + ',' + p.ort[0].toFixed(6); }).join(';') +
+      '?steps=true&overview=false&geometries=geojson&continue_straight=true' +
+      '&waypoints=' + wege.join(';') +
+      '&bearings=' + liste.map(function (p) { return p.halt ? '' : p.kurs + ',40'; }).join(';') +
+      '&radiuses=' + liste.map(function (p) { return p.halt ? 'unlimited' : '40'; }).join(';');
+  }
+
+  function osrmHolen(url) {
+    return hol(url, 20000)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { return d && d.code === 'Ok' && d.routes && d.routes[0] ? d : null; })
+      .catch(function () { return null; });
+  }
+
   function spurenErmitteln(punkte) {
-    var kennung = punkte.map(function (p) { return p[0].toFixed(4) + p[1].toFixed(4); }).join('|');
+    var gestuetzt = stuetzpunkte(punkte);
+    var kennung = punkte.map(function (p) { return p[0].toFixed(4) + p[1].toFixed(4); }).join('|') +
+                  '#' + (gestuetzt ? routePunkte.length + ':' + Math.round(kumWeg[kumWeg.length - 1]) : '');
     if (spurSpeicher.kennung === kennung) return Promise.resolve(spurSpeicher.orte);
     var koords = punkte.map(function (p) { return p[1] + ',' + p[0]; }).join(';');
-    return hol(OSRM + koords + '?steps=true&overview=false&geometries=geojson', 20000)
-      .then(function (r) { return r.ok ? r.json() : null; })
+    var schlicht = OSRM + koords + '?steps=true&overview=false&geometries=geojson';
+    // Klappt es mit Stuetzpunkten nicht (Punkt neben jeder Strasse), wie frueher
+    return (gestuetzt ? osrmHolen(gestuetzt) : Promise.resolve(null))
+      .then(function (d) { return d || osrmHolen(schlicht); })
       .then(function (d) {
         var orte = [];
         if (d && d.routes && d.routes[0]) {
@@ -2333,7 +2513,7 @@
       $('banner-entfernung').textContent = 'Ziel';
       $('banner-anweisung').textContent = zielName.split(',')[0] || 'erreicht';
       ['banner-strasse', 'banner-danach', 'banner-spuren', 'banner-aktuell'].forEach(function (id) { $(id).hidden = true; });
-      if (!gesagt.ziel) { gesagt.ziel = true; sagen('Ziel erreicht'); }
+      if (!gesagt.ziel) { gesagt.ziel = true; sagen('Ziel erreicht'); merken('fahrt', ''); }
       return;
     }
 
@@ -2653,8 +2833,9 @@
     fahrmodusAnwenden();
     if (an && standort) {
       zoomStufe = 0;                      // Tempozoom wieder anwenden
-      if (fahrmodus && kurs !== null) folgeAnsicht(standort);
-      else karte.easeTo({ center: m(standort), zoom: Math.max(karte.getZoom(), 16) });
+      var hier = standortGezeigt || standort;
+      if (fahrmodus && kurs !== null) folgeAnsicht(hier);
+      else karte.easeTo({ center: m(hier), zoom: Math.max(karte.getZoom(), 16) });
     }
   }
   // Der Knopf zeigt den Zustand mit Wort UND Farbe: blau "Folgt ✓" oder
@@ -2700,6 +2881,32 @@
 
     $('stoerfahne').onclick = stoerungZeigen;
     $('k-stau').onclick = ausweichen;
+
+    // Hintergrund-Protokoll der App "Werkstatt" (NaviProtokoll.swift):
+    // zeigen und gleich kopieren, damit man es weitergeben kann
+    $('s-protokoll-teil').hidden = !(naviNativ && window.funkNativ.navi.protokoll);
+    $('s-protokoll').onclick = function () {
+      var knopf = this, pre = $('s-protokoll-text');
+      window.funkNativ.navi.protokoll().then(function (t) {
+        pre.hidden = false;
+        pre.textContent = t || '(noch leer – die App schreibt hinein, sobald eine Fahrt läuft)';
+        pre.scrollTop = pre.scrollHeight;
+        if (t && navigator.clipboard) navigator.clipboard.writeText(t).then(function () {
+          knopf.textContent = '📋 kopiert – z. B. in WhatsApp an Claude einfügen';
+        }, function () {});
+      }, function () { pre.hidden = false; pre.textContent = 'Protokoll nicht lesbar'; });
+    };
+
+    // Navigationsmodus: ein Tipp auf die Ankunftszeile holt Zielfeld und
+    // Vorschlaege kurz zurueck (noch ein Tipp blendet sie wieder aus);
+    // waehrend man tippt, bleiben sie da.
+    $('status').onclick = function () {
+      if (!naviModus) return;
+      naviOffenBis = document.body.classList.contains('navi') ? Date.now() + NAVI_OFFEN : 0;
+      naviModusPruefen();
+    };
+    $('suche').addEventListener('focus', function () { if (naviModus) { naviOffenBis = Infinity; naviModusPruefen(); } });
+    $('suche').addEventListener('blur', function () { if (naviOffenBis === Infinity) naviOffenBis = Date.now() + NAVI_OFFEN; });
 
     $('k-uebersicht').onclick = function () {
       if (routePunkte.length) {
@@ -2844,6 +3051,7 @@
 
     $('s-leeren').onclick = function () {
       stopps = []; stoppMarkenZeichnen(); stoppListeZeichnen();
+      fahrtMerken();
       sperrenLeeren();
       sheetZeigen(false);
       info('Zwischenziele und Sperren gelöscht');
@@ -2944,6 +3152,7 @@
 
     sucheAktivieren();
     knoepfeAktivieren();
+    fahrtHolen();
     standortStarten();
     setInterval(gpsWache, 2000);
     // Zurueck in der App (nach Spotify, Bildschirmsperre): kam seit ein paar
