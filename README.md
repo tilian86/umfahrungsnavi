@@ -73,6 +73,10 @@ beim ersten Start selbst zu BRouter hoch und merkt sich die Kennung.
 
 ## Änderungen
 
+**v37 (07.10.2026)** — Versionsanzeige: ganz unten unter Mehr steht „Staufunk v37“
+(`STAND` in app.js), in der Werkstatt-App zusätzlich deren Bau-Stand (`funkNativ.stand`).
+Bei jeder neuen Fassung `STAND`, alle `?v=` und `VERSION` in sw.js gemeinsam hochzählen.
+
 **v36 (06.10.2026)** — nach der ersten Testfahrt (Rottenburg):
 - **Navigationsmodus:** Beim Fahren verschwinden Zielfeld, Vorschlagskacheln und
   Stoppliste (`naviModusPruefen`, Klasse `navi` am body). Unten bleiben

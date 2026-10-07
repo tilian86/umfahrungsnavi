@@ -20,6 +20,8 @@
   'use strict';
 
   /* ------------------------------------------------------------ Grundwerte */
+  // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
+  var STAND = 'v37';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -2881,6 +2883,10 @@
 
     $('stoerfahne').onclick = stoerungZeigen;
     $('k-stau').onclick = ausweichen;
+
+    // Unten unter Mehr: welche Fassung läuft (und welcher Bau der Werkstatt-App)
+    $('s-stand').textContent = 'Staufunk ' + STAND +
+      (window.funkNativ && window.funkNativ.stand ? ' · Werkstatt-App ' + window.funkNativ.stand : '');
 
     // Hintergrund-Protokoll der App "Werkstatt" (NaviProtokoll.swift):
     // zeigen und gleich kopieren, damit man es weitergeben kann
