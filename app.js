@@ -21,7 +21,7 @@
 
   /* ------------------------------------------------------------ Grundwerte */
   // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
-  var STAND = 'v40';
+  var STAND = 'v41';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -1252,7 +1252,12 @@
       if (ziel && routePunkte.length) return;   // inzwischen Route da
       blitzer = b;
       blitzerZeichnen();
-    }, function () { umLaeuft = false; });
+    }, function () {
+      // Abfrage misslungen (Funkloch, atudo bremst): die Gegend NICHT als
+      // erledigt merken. Sonst schweigt der Warner hier zehn Minuten weiter,
+      // obwohl das Netz nach ein paar Sekunden wieder da ist.
+      umLaeuft = false; umLetzt = null;
+    });
   }
 
   function verkehrTaktStarten() {
@@ -1286,7 +1291,7 @@
     });
   }
 
-  // Warnt nur vor Blitzern  // Warnt nur vor Blitzern, auf die man wirklich zufährt. OSM hält bei vielen
+  // Warnt nur vor Blitzern, auf die man wirklich zufährt. OSM hält bei vielen
   // Standorten die Messrichtung fest; wo sie fehlt, wird über den Kurs
   // entschieden, um Gegenrichtungs-Fehlalarme zu vermeiden.
   function blitzPruefen(ll) {
