@@ -10,12 +10,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Staufunk">
-  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=37">
+  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=38">
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <link rel="manifest" href="manifest.json">
   <title>Staufunk</title>
-  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=37">
-  <link rel="stylesheet" href="stil.css?v=37">
+  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=38">
+  <link rel="stylesheet" href="stil.css?v=38">
 </head>
 <body>
 
@@ -52,9 +52,22 @@
     <div id="suchzeile">
       <input id="suche" type="search" placeholder="Ziel eingeben" autocomplete="off"
              autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
+      <button id="suche-sprechen" title="Ziel sagen">🎤</button>
       <button id="suche-loeschen" title="Ziel löschen" hidden>✕</button>
     </div>
     <div id="vorschlaege" hidden></div>
+
+    <!-- Straße angetippt: Hausnummer nachtragen, statt am Straßenanfang zu landen -->
+    <div id="hausnr" hidden>
+      <div id="hausnr-wo"></div>
+      <div class="hausnr-reihe">
+        <input id="hausnr-feld" type="text" inputmode="numeric" placeholder="Hausnr."
+               autocomplete="off" autocorrect="off" autocapitalize="off"
+               spellcheck="false" enterkeyhint="go">
+        <button id="hausnr-los">Los</button>
+        <button id="hausnr-ohne">ohne Nr.</button>
+      </div>
+    </div>
 
     <div id="stoppliste" hidden></div>
     <div id="varianten" hidden></div>
@@ -167,11 +180,11 @@
     <p id="s-stand"></p>
   </div>
 
-  <script src="vendor/maplibre/maplibre-gl.js?v=37"></script>
-  <script src="verkehr.js?v=37"></script>
+  <script src="vendor/maplibre/maplibre-gl.js?v=38"></script>
+  <script src="verkehr.js?v=38"></script>
   <!-- tut nichts, ausser die Adresse enthaelt ?pruefstand -->
-  <script src="pruefstand.js?v=37"></script>
-  <script src="app.js?v=37"></script>
+  <script src="pruefstand.js?v=38"></script>
+  <script src="app.js?v=38"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {

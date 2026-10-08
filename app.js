@@ -21,7 +21,7 @@
 
   /* ------------------------------------------------------------ Grundwerte */
   // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
-  var STAND = 'v37';
+  var STAND = 'v38';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -760,12 +760,17 @@
     if (erste && ziel) route();
     if (ziel && !gesagt.ziel && Date.now() - fahrtGemerkt > 60000) fahrtMerken();
     if (ziel && routePunkte.length) {
-      [bannerAktualisieren, blitzPruefen, abweichungPruefen, fahrdatenZeigen,
+      [bannerAktualisieren, abweichungPruefen, fahrdatenZeigen,
        durchfahrenPruefen, alternativenRaeumen].forEach(function (f) { sicher(f, ll); });
       if (blitzBisS && lotS > blitzBisS - 5000) sicher(blitzerNachladen);
       if (naviNeu) { naviNeu = false; letzteNeu = Date.now(); abseitsZaehler = 0; route(); }
       else sicher(naviGesagtMelden);
     }
+    // Blitzer hängen NICHT am Ziel: bis 08.10.2026 lief der Warner nur,
+    // solange eine Route berechnet war - auf der bekannten Strecke ohne
+    // eingegebenes Ziel schwieg er also komplett. Genau das war gemeldet.
+    sicher(blitzerPflegen, ll);
+    sicher(blitzPruefen, ll);
     sicher(tempoEcke, ll);
   }
 
@@ -1226,6 +1231,25 @@
     });
   }
 
+  // Blitzer im Umkreis, wenn kein Ziel gesetzt ist. Neu geholt, sobald man
+  // 3 km weiter ist oder 10 Minuten vergangen sind (mobile Blitzer kommen
+  // und gehen). Mit Route uebernimmt blitzerNachladen.
+  var umLetzt = null, umZeit = 0, umLaeuft = false;
+  function blitzerPflegen(ll) {
+    if (!blitzWarnen || modus !== 'auto') return;
+    if (ziel && routePunkte.length) { umLetzt = null; return; }
+    if (umLaeuft) return;
+    var jetzt = Date.now();
+    if (umLetzt && abstand(ll, umLetzt) < 3000 && jetzt - umZeit < 600000) return;
+    umLaeuft = true; umLetzt = ll; umZeit = jetzt;
+    window.Verkehr.blitzerUmher(ll, 7).then(function (b) {
+      umLaeuft = false;
+      if (ziel && routePunkte.length) return;   // inzwischen Route da
+      blitzer = b;
+      blitzerZeichnen();
+    }, function () { umLaeuft = false; });
+  }
+
   function verkehrTaktStarten() {
     clearInterval(verkehrTimer);
     // Alle drei Minuten. Häufiger lohnt nicht - Staumeldungen ändern sich
@@ -1262,10 +1286,15 @@
   // entschieden, um Gegenrichtungs-Fehlalarme zu vermeiden.
   function blitzPruefen(ll) {
     if (!blitzWarnen || modus === 'rad' || !blitzer.length) { $('blitzfahne').hidden = true; return; }
+    // Sichtweite nach Tempo statt fester 500 m: bei 100 km/h waren 500 m nur
+    // 18 Sekunden, die Ansage bei 350 m gerade 12 - zu knapp, um noch ruhig
+    // vom Gas zu gehen. 25 Sekunden Vorlauf sind bei 100 km/h knapp 700 m,
+    // in der Stadt bleiben es die 500 m.
+    var sicht = Math.max(500, tempoKmh / 3.6 * 25);
     var naechster = null, nd = Infinity;
     blitzer.forEach(function (b) {
       var d = abstand(ll, b.ort);
-      if (d > 500 || d >= nd) return;
+      if (d > sicht || d >= nd) return;
       if (kurs !== null) {
         // Liegt der Blitzer ungefähr voraus?
         if (window.Verkehr.winkelDiff(window.Verkehr.peilung(ll, b.ort), kurs) > 65) return;
@@ -1281,7 +1310,7 @@
                     ' in ' + Math.round(nd / 10) * 10 + ' m' +
                     (naechster.tempo ? ' · Tempo ' + naechster.tempo : '');
     var schluessel = 'blitz' + naechster.ort[0].toFixed(5);
-    if (nd < 350 && !gesagt[schluessel]) {
+    if (nd < sicht * 0.75 && !gesagt[schluessel]) {
       gesagt[schluessel] = true;
       sagen('Achtung, ' + (naechster.mobil ? 'mobiler Blitzer' : 'Blitzer') +
             (naechster.tempo ? '. Tempo ' + naechster.tempo : ' voraus'));
@@ -1386,6 +1415,8 @@
     $('blitzfahne').hidden = true;
     $('suche').value = '';
     $('suche-loeschen').hidden = true;
+    $('vorschlaege').hidden = true;
+    hausnrSchliessen();
     ersatzfahne(false);
     fahrmodusAnwenden();
     info('Ziel gelöscht');
@@ -2318,17 +2349,28 @@
         }
         if (best && best.spuren) {
           h.spuren = best.spuren;
-          // "rechts einordnen" in die Ansage, wenn die gueltigen Spuren
-          // eindeutig auf einer Seite liegen und es was zum Einordnen gibt
-          var n = best.spuren.length;
+          // Spuransage nur, wenn sie etwas hinzufügt. Auf welcher Seite die
+          // gültigen Spuren liegen, sagt für sich genommen nichts: wer rechts
+          // abbiegt, fährt ohnehin rechts.
+          var n = best.spuren.length, seite = null;
           if (n >= 3) {
             var gueltig = [];
             best.spuren.forEach(function (sp, i) { if (sp.an) gueltig.push(i); });
             if (gueltig.length && gueltig.length < n) {
-              if (gueltig[0] >= n - gueltig.length) h.einordnen = 'rechts einordnen';
-              else if (gueltig[gueltig.length - 1] < gueltig.length) h.einordnen = 'links einordnen';
+              if (gueltig[0] >= n - gueltig.length) seite = 'rechts';
+              else if (gueltig[gueltig.length - 1] < gueltig.length) seite = 'links';
             }
           }
+          var eigene = seiteVon(h);
+          // Gemeldet am 08.10.2026: "rechts abbiegen, rechts einordnen, dann
+          // links abbiegen". Die Spurseite gehört zur AKTUELLEN Straße, die
+          // zweite Abbiegung aber zur nächsten - und wer gleich danach links
+          // muss, stand damit auf der falschen Spur. Zwei Regeln daraus:
+          //   1. Seite gleich wie die Abbiegerichtung: nichts sagen.
+          //   2. Zweite Abbiegung in die andere Richtung: Spuransage weg,
+          //      stattdessen die Verkettung betonen ("dann sofort links").
+          if (seite && seite !== eigene) h.einordnen = seite + ' einordnen';
+          if (h.danachSeite && eigene && h.danachSeite !== eigene) h.einordnen = null;
         }
       });
       if (standort) sicher(bannerAktualisieren, standort);
@@ -2406,13 +2448,32 @@
            /_link$/.test(wegBis(arten, k + 1));
   }
 
+  // Seite eines Hinweises - aus dem Text, nicht aus dem Winkel: bei "halten"
+  // ist der Winkel nachträglich verbogen, der Text stimmt immer.
+  function seiteVon(h) {
+    if (/links/.test(h.text)) return 'links';
+    if (/rechts/.test(h.text)) return 'rechts';
+    return null;
+  }
+  // Zwei Abbiegungen dicht hintereinander verketten. Die Seite der zweiten
+  // wird mitgeschrieben: danach entscheidet sich, ob eine Spuransage hilft
+  // oder in die Irre führt (siehe spurenAnheften).
+  function kettenBauen(l) {
+    l.forEach(function (h, i) {
+      var n = l[i + 1];
+      if (!n) return;
+      var d = abstand(h.ort, n.ort);
+      if (d >= 180) return;
+      h.danach = n.text;
+      h.danachM = d;
+      h.danachSeite = seiteVon(n);
+    });
+  }
+
   function hinweiseBauen(v) {
     if (v.osrmSteps) {
       var l = osrmHinweise(v);
-      l.forEach(function (h, i) {
-        var n = l[i + 1];
-        if (n && abstand(h.ort, n.ort) < 180) h.danach = n.text;
-      });
+      kettenBauen(l);
       return l;
     }
     var arten = strassenArten(v);
@@ -2447,10 +2508,7 @@
 
     // Zwei Abbiegungen dicht hintereinander zusammenfassen - im Auto braucht
     // man beide auf einmal, sonst kommt die zweite zu spät.
-    liste.forEach(function (h, i) {
-      var n = liste[i + 1];
-      if (n && abstand(h.ort, n.ort) < 180) h.danach = n.text;
-    });
+    kettenBauen(liste);
     return liste;
   }
 
@@ -2562,7 +2620,8 @@
     $('banner-strasse').textContent = zeile.join(' · ').replace(' · Richtung', ' Richtung');
 
     $('banner-danach').hidden = !h.danach;
-    if (h.danach) $('banner-danach').textContent = 'dann ' + h.danach;
+    if (h.danach) $('banner-danach').textContent =
+      'dann ' + (h.danachM < 80 ? 'sofort ' : '') + h.danach;
 
     // Spurleiste: welche Spuren zum Manoever fuehren
     var leiste = $('banner-spuren');
@@ -2604,8 +2663,10 @@
   // Bei "halten" steckt die Seite schon in der Ansage.
   function ansageTexte(h, neuName) {
     var st = h.strasse;
+    // "dann sofort links abbiegen" unter 80 m: das Wort sagt, dass man sich
+    // nach dem Abbiegen gleich wieder einordnen muss.
     var anhang = (h.einordnen && !/halten/.test(h.text) ? ', ' + h.einordnen : '') +
-                 (h.danach ? ', dann ' + h.danach : '');
+                 (h.danach ? ', dann ' + (h.danachM < 80 ? 'sofort ' : '') + h.danach : '');
     var wohin = neuName ? mitArtikel(neuName) : null;
     var text = h.text.replace(' – ', ', ');
     if (wohin) text = text.replace(/ abbiegen$/, '') + ' auf ' + wohin;
@@ -2722,12 +2783,55 @@
   }
 
   /* ------------------------------------------------------------ Adresssuche */
+  // Photons eigener Ortsbezug (&lat=&lon=) ist zu schwach: gemessen am
+  // 08.10.2026 von Rottenburg aus liefert "Globus" als ersten Treffer einen
+  // Globus in Singen (80 km), der Globus Baumarkt 1,6 km weiter kommt gar
+  // nicht vor. &location_bias_scale macht es sogar schlimmer (dann stehen
+  // Lettland und Indien oben). Was wirklich wirkt, ist &bbox.
+  // Deshalb zwei Abfragen: eine im Umkreis von ~70 km, eine ohne Grenze.
+  // Die nahen Treffer kommen zuerst, die fernen danach - so findet man
+  // "Globus" vor der Haustür UND "Hamburg".
+  var PHOTON = 'https://photon.komoot.io/api/?lang=de&limit=';
+
+  function photonTreffer(d) {
+    return (d.features || []).map(function (f) {
+      var pr = f.properties || {}, c = f.geometry.coordinates;
+      var ort = pr.city || pr.town || pr.village || pr.county || '';
+      var strasse = pr.street || (pr.osm_key === 'highway' ? pr.name : '');
+      var teile = [pr.name || pr.street || ''];
+      if (pr.street && pr.name && pr.street !== pr.name) teile.push(pr.street);
+      if (pr.housenumber) teile[teile.length - 1] += ' ' + pr.housenumber;
+      if (ort) teile.push(ort);
+      return {
+        name: teile.filter(Boolean).join(', '),
+        lat: c[1], lon: c[0], ort: ort, strassenname: strasse,
+        // Eine Straße ohne Hausnummer: dann lohnt die Nachfrage nach der Nummer
+        nurStrasse: pr.osm_key === 'highway' && !pr.housenumber
+      };
+    }).filter(function (t) { return t.name; });
+  }
+
+  // Fragt Photon und schluckt jeden Fehler - der Aufrufer entscheidet
+  // anhand der leeren Liste, ob der Rückfall auf Nominatim nötig ist.
+  // `anzahl` ist in der Nähe bewusst hoch: Photon sortiert auch innerhalb
+  // einer bbox nach Bedeutung, nicht nach Entfernung. Mit 7 Treffern fiel
+  // der Globus in Rottenburg (8,7 km) komplett aus der Liste, während Horb
+  // (28 km) obenstand; mit 20 ist er dabei und die Sortierung nach
+  // Entfernung zieht ihn nach oben. Gemessen am 08.10.2026.
+  function photonFragen(text, extra, anzahl) {
+    return hol(PHOTON + (anzahl || 7) + '&q=' + encodeURIComponent(text) + (extra || ''), 8000)
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(photonTreffer)
+      .catch(function () { return []; });
+  }
+
   function sucheAktivieren() {
     var feld = $('suche'), liste = $('vorschlaege');
 
     feld.addEventListener('input', function () {
       clearTimeout(vorschlagTimer);
       $('suche-loeschen').hidden = !feld.value;
+      hausnrSchliessen();
       var text = feld.value.trim();
       if (text.length < 3) { liste.hidden = true; return; }
       // Nominatim erlaubt höchstens eine Anfrage pro Sekunde - deshalb
@@ -2736,48 +2840,68 @@
         var jetzt = Date.now();
         if (jetzt - letzteSuche < 350) return;
         letzteSuche = jetzt;
-        var nah = standort ? '&lat=' + standort[0].toFixed(3) + '&lon=' + standort[1].toFixed(3) : '';
 
-        // Photon (Komoot) statt Nominatim: versteht Tippfehler und ist fuer
-        // Vervollstaendigung gebaut. Nominatim bleibt Rueckfall.
-        // Kurzes Zeitlimit: haengt Photon, soll der Rueckfall auf Nominatim
-        // anspringen statt dass die Trefferliste stumm leer bleibt.
-        hol('https://photon.komoot.io/api/?q=' + encodeURIComponent(text) +
-            '&limit=6&lang=de' + nah, 8000)
-          .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
-          .then(function (d) {
-            var treffer = (d.features || []).map(function (f) {
-              var pr = f.properties || {};
-              var teile = [pr.name || pr.street || ''];
-              if (pr.street && pr.name && pr.street !== pr.name) teile.push(pr.street);
-              if (pr.housenumber) teile[teile.length - 1] += ' ' + pr.housenumber;
-              if (pr.city || pr.town || pr.village) teile.push(pr.city || pr.town || pr.village);
-              return { name: teile.filter(Boolean).join(', '),
-                       lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0] };
-            }).filter(function (t) { return t.name; });
-            if (!treffer.length) throw new Error('leer');
-            zeigen(treffer);
-          })
-          .catch(function () {
-            hol('https://nominatim.openstreetmap.org/search?format=json&limit=6&countrycodes=de,at,ch&q=' +
-                encodeURIComponent(text), 8000)
-              .then(function (r) { return r.json(); })
-              .then(function (t) {
-                zeigen(t.map(function (o) {
-                  return { name: o.display_name.split(',').slice(0, 3).join(','),
-                           lat: parseFloat(o.lat), lon: parseFloat(o.lon) };
-                }));
-              })
-              .catch(function () { liste.hidden = true; });
+        // ~70 km um den Standort. Bewusst als bbox, nicht als lat/lon-Wichtung.
+        var umkreis = '';
+        if (standort) {
+          umkreis = '&bbox=' + (standort[1] - 0.9).toFixed(3) + ',' +
+                               (standort[0] - 0.65).toFixed(3) + ',' +
+                               (standort[1] + 0.9).toFixed(3) + ',' +
+                               (standort[0] + 0.65).toFixed(3);
+        }
+        Promise.all([
+          umkreis ? photonFragen(text, umkreis, 20) : Promise.resolve([]),
+          photonFragen(text, '', 7)
+        ]).then(function (teile) {
+          var treffer = mischen(teile[0], teile[1]);
+          if (treffer.length) { zeigen(treffer); return; }
+          // Photon stumm oder nichts gefunden: Nominatim als Rückfall
+          return hol('https://nominatim.openstreetmap.org/search?format=json&limit=6&countrycodes=de,at,ch&q=' +
+                     encodeURIComponent(text), 8000)
+            .then(function (r) { return r.json(); })
+            .then(function (t) {
+              zeigen(t.map(function (o) {
+                return { name: o.display_name.split(',').slice(0, 3).join(','),
+                         lat: parseFloat(o.lat), lon: parseFloat(o.lon) };
+              }));
+            })
+            .catch(function () { liste.hidden = true; });
+        });
+
+        // Nahe Treffer zuerst (nach Entfernung), ferne danach in Photons
+        // eigener Reihenfolge. Doppelte fliegen über die Koordinate raus.
+        function mischen(nah, fern) {
+          nah.forEach(function (o) {
+            o.weg = standort ? abstand(standort, [o.lat, o.lon]) : 0;
           });
+          nah.sort(function (a, b) { return a.weg - b.weg; });
+          var raus = [];
+          nah.concat(fern).forEach(function (o) {
+            if (o.weg == null && standort) o.weg = abstand(standort, [o.lat, o.lon]);
+            // Derselbe Ort kommt mehrfach zurück ("Globus Baumarkt",
+            // "Parkplatz Globus", "Rottenburg Globus-Baumarkt" liegen alle
+            // auf demselben Gelände). Alles unter 80 m gilt als ein Ziel.
+            var doppelt = raus.some(function (a) {
+              return abstand([a.lat, a.lon], [o.lat, o.lon]) < 80;
+            });
+            if (!doppelt) raus.push(o);
+          });
+          return raus.slice(0, 8);
+        }
 
         function zeigen(treffer) {
           liste.innerHTML = '';
           if (!treffer.length) { liste.hidden = true; return; }
           treffer.forEach(function (o) {
             var z = document.createElement('div');
-            z.textContent = o.name;
+            // Entfernung mit dazu: "Globus Baumarkt, Rottenburg · 1,6 km"
+            // macht sofort sichtbar, welcher der beiden gemeint ist.
+            var txt = o.name + (o.weg ? ' · ' + wegText(o.weg) : '');
+            z.textContent = o.nurStrasse ? txt + ' ›' : txt;
             z.onclick = function () {
+              // Straße ohne Nummer: nach der Hausnummer fragen statt
+              // blind den Straßenanfang anzufahren
+              if (o.nurStrasse && !stoppmodus) { hausnrFragen(o); return; }
               liste.hidden = true; feld.blur();
               if (stoppmodus) {
                 stoppmodus = false; knopfStand();
@@ -2797,6 +2921,7 @@
     // Leeres Feld antippen zeigt die letzten Ziele - die meisten Fahrten
     // gehen immer wieder an dieselben Orte.
     feld.addEventListener('focus', function () {
+      hausnrSchliessen();
       if (feld.value.trim()) return;
       var alte = [];
       try { alte = JSON.parse(geholt('ziele', '[]')); } catch (e) {}
@@ -2818,6 +2943,115 @@
       setTimeout(function () { liste.hidden = true; }, 250);
     });
     $('suche-loeschen').onclick = zielLoeschen;
+    hausnrAktivieren();
+    spracheEingabeAktivieren();
+  }
+
+  /* ------------------------------------------------------------ Hausnummer */
+  // Eine Straße als Ziel landet am Straßenanfang - bei der Archivstraße sind
+  // das schnell 600 m Fußweg. Deshalb: Straße antippen, Nummer eintragen.
+  var hausnrOrt = null;
+  function hausnrFragen(o) {
+    hausnrOrt = o;
+    $('vorschlaege').hidden = true;
+    $('hausnr-wo').textContent = (o.strassenname || o.name.split(',')[0]) +
+                                 (o.ort ? ', ' + o.ort : '');
+    $('hausnr').hidden = false;
+    var f = $('hausnr-feld');
+    f.value = '';
+    f.focus();
+  }
+  function hausnrSchliessen() {
+    hausnrOrt = null;
+    $('hausnr').hidden = true;
+  }
+  function hausnrAktivieren() {
+    var f = $('hausnr-feld');
+    $('hausnr-ohne').onclick = function () {
+      var o = hausnrOrt;
+      hausnrSchliessen();
+      if (o) { $('suche').blur(); zielSetzen(o.lat, o.lon, o.name); }
+    };
+    $('hausnr-los').onclick = hausnrSuchen;
+    f.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); hausnrSuchen(); }
+    });
+  }
+  function hausnrSuchen() {
+    var o = hausnrOrt, nr = $('hausnr-feld').value.trim();
+    if (!o) return;
+    if (!nr) { $('hausnr-ohne').onclick(); return; }
+    var strasse = o.strassenname || o.name.split(',')[0];
+    // Eng um die gefundene Straße suchen (~5 km), sonst kommt die
+    // gleichnamige Straße in Bern zurück - genau das passierte bei
+    // "Archivstrasse 3" im Test.
+    var box = '&bbox=' + (o.lon - 0.07).toFixed(3) + ',' + (o.lat - 0.05).toFixed(3) + ',' +
+                         (o.lon + 0.07).toFixed(3) + ',' + (o.lat + 0.05).toFixed(3);
+    info('Suche ' + strasse + ' ' + nr + ' …');
+    photonFragen(strasse + ' ' + nr + (o.ort ? ', ' + o.ort : ''), box)
+      .then(function (treffer) {
+        // Nur Treffer, die wirklich eine Hausnummer tragen
+        var passend = treffer.filter(function (t) { return !t.nurStrasse; });
+        var ziel1 = passend[0] || null;
+        hausnrSchliessen();
+        $('suche').blur();
+        if (ziel1) {
+          var name = strasse + ' ' + nr + (o.ort ? ', ' + o.ort : '');
+          $('suche').value = name;
+          zielSetzen(ziel1.lat, ziel1.lon, name);
+        } else {
+          info('Hausnummer ' + nr + ' nicht gefunden – Straße gesetzt');
+          zielSetzen(o.lat, o.lon, o.name);
+        }
+      });
+  }
+
+  /* --------------------------------------------------------- Ziel ansagen */
+  // Tippen im Auto ist nichts. Safari kann seit iOS 14.5 Spracherkennung;
+  // wo sie fehlt (Firefox), verschwindet der Knopf einfach.
+  function spracheEingabeAktivieren() {
+    var Erk = window.SpeechRecognition || window.webkitSpeechRecognition;
+    var k = $('suche-sprechen'), feld = $('suche');
+    if (!Erk) { k.hidden = true; return; }
+    var erk = null, laeuft = false;
+    k.onclick = function () {
+      if (laeuft) { try { erk.stop(); } catch (e) {} return; }
+      // Sonst diktiert die App ihre eigene Ansage mit
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      erk = new Erk();
+      erk.lang = 'de-DE';
+      erk.interimResults = true;
+      erk.continuous = false;
+      erk.maxAlternatives = 1;
+      erk.onstart = function () {
+        laeuft = true;
+        k.classList.add('hoert');
+        feld.placeholder = 'Sprich das Ziel …';
+      };
+      erk.onresult = function (e) {
+        var t = '';
+        for (var i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
+        feld.value = t;
+        $('suche-loeschen').hidden = !t;
+        // Erst beim fertigen Satz suchen, nicht bei jedem Zwischenstand
+        if (e.results[e.results.length - 1].isFinal) {
+          feld.dispatchEvent(new Event('input'));
+        }
+      };
+      erk.onerror = function (e) {
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+          info('Mikrofon nicht erlaubt – für diese Seite freigeben');
+        } else if (e.error === 'no-speech') {
+          info('Nichts gehört');
+        }
+      };
+      erk.onend = function () {
+        laeuft = false;
+        k.classList.remove('hoert');
+        feld.placeholder = 'Ziel eingeben';
+      };
+      try { erk.start(); } catch (e) { laeuft = false; }
+    };
   }
 
   /* ----------------------------------------------------------------- Knöpfe */

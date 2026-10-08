@@ -112,46 +112,129 @@
 
   // Primaer blitzer.de (atudo): kennt neben den festen auch die MOBILEN
   // Blitzer des Tages - das kann OpenStreetMap nicht. Typen 1-6 fest,
-  // 20-26 mobil/teilstationaer. Ein Rechteck um die naechsten Kilometer,
-  // danach auf den Korridor gefiltert.
-  function atudoLaden(vorne) {
-    var minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
-    vorne.forEach(function (p) {
-      if (p[0] < minLat) minLat = p[0]; if (p[0] > maxLat) maxLat = p[0];
-      if (p[1] < minLon) minLon = p[1]; if (p[1] > maxLon) maxLon = p[1];
+  // 20-26 mobil/teilstationaer.
+  //
+  // WICHTIG: atudo fasst Blitzer zu "cluster"-Eintraegen zusammen, sobald das
+  // abgefragte Rechteck gross wird - und ein Cluster verraet die einzelnen
+  // Standorte nicht, nur eine Anzahl. Frueher fragte diese Datei EIN Rechteck
+  // ueber die ganze Route ab und warf die Cluster weg. Gemessen am 08.10.2026
+  // fuer den Grossraum Tuebingen-Stuttgart: eine Box liefert 23 Blitzer
+  // einzeln und verdeckt 163 weitere in 26 Clustern; in Kacheln von 0,05 Grad
+  // abgefragt kommen 223 heraus. Auf langen Strecken fiel also der Grossteil
+  // der Warnungen aus. Der Parameter `zoom` hilft nicht (geprueft).
+  // Deshalb: den Routenkorridor in Kacheln zerlegen und die parallel abfragen.
+  var ATUDO = 'https://cdn2.atudo.net/api/4.0/pois.php';
+  var ATUDO_TYPEN = '1,2,3,4,5,6,20,21,22,23,24,25,26';
+  var KACHEL = 0.05;        // Grad Kantenlaenge; darueber faengt atudo an zu clustern
+  var KACHELRAND = 0.006;   // Grad Zugabe (~650 m), damit am Kachelrand nichts fehlt
+  var MAX_KACHELN = 14;     // Deckel: eine Fernfahrt soll keine 50 Anfragen stellen
+
+  // Den Streckenverlauf in Kacheln von hoechstens KACHEL Grad zerlegen. Das
+  // folgt dem Korridor statt dem umschliessenden Rechteck - bei einer
+  // L-foermigen Route sind das halb so viele Anfragen.
+  function kacheln(route) {
+    var liste = [], cur = null;
+    route.forEach(function (p) {
+      if (!cur) { cur = [p[0], p[1], p[0], p[1]]; return; }
+      var a0 = Math.min(cur[0], p[0]), a1 = Math.max(cur[2], p[0]);
+      var o0 = Math.min(cur[1], p[1]), o1 = Math.max(cur[3], p[1]);
+      if (a1 - a0 > KACHEL || o1 - o0 > KACHEL) {
+        liste.push(cur);
+        cur = [p[0], p[1], p[0], p[1]];
+      } else cur = [a0, o0, a1, o1];
     });
-    var box = (minLat - 0.01) + ',' + (minLon - 0.01) + ',' +
-              (maxLat + 0.01) + ',' + (maxLon + 0.01);
-    return abruf('https://cdn2.atudo.net/api/4.0/pois.php?type=1,2,3,4,5,6,20,21,22,23,24,25,26&box=' + box,
-                 10000, 'json')
-      .then(function (d) {
-        return (d.pois || []).filter(function (x) { return x.type !== 'cluster'; })
-          .map(function (x) {
-            var mobil = parseInt(x.type, 10) >= 20;
-            return {
-              ort: [parseFloat(x.lat), parseFloat(x.lng)],
-              tempo: parseInt(x.vmax, 10) || null,
-              richtung: [],
-              mobil: mobil
-            };
-          })
-          .filter(function (b) {
-            if (isNaN(b.ort[0])) return false;
-            // nur was am Weg liegt
-            var lage = anDerRoute(b.ort, vorne);
-            return lage.abstand < 300;
-          });
-      });
+    if (cur) liste.push(cur);
+    return liste.slice(0, MAX_KACHELN);
   }
 
+  // Rohabfrage mehrerer Boxen, entdoppelt. Meldet mit, ob atudo trotzdem
+  // zusammengefasst hat - dann war die Box noch zu gross.
+  function atudoBoxen(boxen) {
+    var fehler = 0;
+    return Promise.all(boxen.map(function (b) {
+      var box = (b[0] - KACHELRAND).toFixed(4) + ',' + (b[1] - KACHELRAND).toFixed(4) + ',' +
+                (b[2] + KACHELRAND).toFixed(4) + ',' + (b[3] + KACHELRAND).toFixed(4);
+      return abruf(ATUDO + '?type=' + ATUDO_TYPEN + '&box=' + box, 10000, 'json')
+        .then(function (d) { return d.pois || []; },
+              // Eine einzelne Kachel darf fehlen - lieber die anderen melden
+              // als gar nichts. Nur wenn ALLE scheitern, geht es zu OSM.
+              function () { fehler++; return []; });
+    })).then(function (antworten) {
+      if (fehler === boxen.length) throw new Error('atudo aus');
+      var gesehen = {}, raus = [], cluster = 0;
+      antworten.forEach(function (liste) {
+        liste.forEach(function (x) {
+          if (x.type === 'cluster') { cluster++; return; }
+          var la = parseFloat(x.lat), lo = parseFloat(x.lng);
+          if (isNaN(la) || isNaN(lo)) return;
+          // Kacheln ueberlappen am Rand - dasselbe nur einmal
+          var id = x.id || (la.toFixed(5) + ',' + lo.toFixed(5));
+          if (gesehen[id]) return;
+          gesehen[id] = true;
+          raus.push({
+            ort: [la, lo],
+            tempo: parseInt(x.vmax, 10) || null,
+            richtung: [],
+            mobil: parseInt(x.type, 10) >= 20
+          });
+        });
+      });
+      return { liste: raus, cluster: cluster };
+    });
+  }
+
+  function atudoLaden(vorne) {
+    return atudoBoxen(kacheln(vorne)).then(function (erg) {
+      return erg.liste.filter(function (b) {
+        return anDerRoute(b.ort, vorne).abstand < 300;
+      });
+    });
+  }
+
+  // Blitzer rund um den Standort - fuer die Fahrt OHNE Ziel. Ein
+  // Blitzerwarner muss immer warnen, nicht nur wenn gerade eine Route
+  // laeuft; genau daran lag es, dass er sich "generell" nicht meldete.
+  // Eine Box von +-7 km clustert noch nicht; falls doch, werden die vier
+  // Viertel einzeln nachgefragt.
+  var umSpeicher = { kennung: null, treffer: [], zeit: 0 };
+  function blitzerUmher(ort, km) {
+    var r = km || 7;
+    var gLa = r / 111, gLo = r / (111 * Math.cos(ort[0] * Math.PI / 180));
+    var kennung = ort[0].toFixed(2) + ',' + ort[1].toFixed(2) + '/' + r;
+    if (umSpeicher.kennung === kennung &&
+        Date.now() - umSpeicher.zeit < BLITZ_HALTBAR) {
+      return Promise.resolve(umSpeicher.treffer);
+    }
+    var ganz = [[ort[0] - gLa, ort[1] - gLo, ort[0] + gLa, ort[1] + gLo]];
+    return atudoBoxen(ganz).then(function (erg) {
+      if (!erg.cluster) return erg.liste;
+      var viertel = [];
+      [[-1, -1], [-1, 1], [1, -1], [1, 1]].forEach(function (q) {
+        viertel.push([ort[0] + (q[0] < 0 ? -gLa : 0), ort[1] + (q[1] < 0 ? -gLo : 0),
+                      ort[0] + (q[0] < 0 ? 0 : gLa), ort[1] + (q[1] < 0 ? 0 : gLo)]);
+      });
+      return atudoBoxen(viertel).then(function (e2) { return e2.liste; });
+    }).then(function (liste) {
+      var raus = liste.filter(function (b) { return abstand(ort, b.ort) < r * 1000; });
+      umSpeicher = { kennung: kennung, treffer: raus, zeit: Date.now() };
+      return raus;
+    }).catch(function () { return umSpeicher.treffer; });
+  }
+
+  // Mobile Blitzer ("Blitzer des Tages") kommen und gehen waehrend der Fahrt.
+  // Deshalb gilt das Gemerkte nur 10 Minuten, danach wird neu gefragt.
+  var BLITZ_HALTBAR = 600000;
   function blitzerLaden(route, maxKm) {
     if (!route || route.length < 2) return Promise.resolve([]);
     var vorne = kuerzen(route, maxKm || 25);
     var kennung = kennungVon(vorne);
-    if (blitzSpeicher.kennung === kennung) return Promise.resolve(blitzSpeicher.treffer);
+    if (blitzSpeicher.kennung === kennung &&
+        Date.now() - (blitzSpeicher.zeit || 0) < BLITZ_HALTBAR) {
+      return Promise.resolve(blitzSpeicher.treffer);
+    }
 
     return atudoLaden(vorne).then(function (treffer) {
-      blitzSpeicher = { kennung: kennung, treffer: treffer };
+      blitzSpeicher = { kennung: kennung, treffer: treffer, zeit: Date.now() };
       return treffer;
     }).catch(function () { return blitzerLadenOSM(vorne, kennung); });
   }
@@ -176,7 +259,7 @@
                       .filter(function (n) { return !isNaN(n); })
         };
       }).filter(function (b) { return b.ort[0] != null; });
-      blitzSpeicher = { kennung: kennung, treffer: treffer };
+      blitzSpeicher = { kennung: kennung, treffer: treffer, zeit: Date.now() };
       return treffer;
     }).catch(function () { return blitzSpeicher.treffer; });
   }
@@ -596,6 +679,7 @@
 
   window.Verkehr = {
     blitzerLaden: blitzerLaden,
+    blitzerUmher: blitzerUmher,
     refsErmitteln: refsErmitteln,
     autobahnStoerungen: autobahnStoerungen,
     ticStoerungen: ticStoerungen,
