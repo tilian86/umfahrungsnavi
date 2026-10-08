@@ -21,7 +21,7 @@
 
   /* ------------------------------------------------------------ Grundwerte */
   // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
-  var STAND = 'v38';
+  var STAND = 'v39';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -772,6 +772,11 @@
     sicher(blitzerPflegen, ll);
     sicher(blitzPruefen, ll);
     sicher(tempoEcke, ll);
+    // Auch hier nachsehen, ob eine neuere Fassung liegt: ob die App
+    // "Werkstatt" beim Oeffnen der Kachel visibilitychange feuert, ist nicht
+    // verlaesslich - ein GPS-Fix kommt dagegen sicher. standPruefen() bremst
+    // sich selbst auf alle fuenf Minuten.
+    sicher(standPruefen);
   }
 
   function positionFehler(e) {
@@ -2674,6 +2679,41 @@
     return { ton: text + anhang, jetzt: 'Jetzt ' + h.text.replace(' – ', ', ') + anhang };
   }
 
+  /* -------------------------------------------- Frischer Stand der Seite */
+  // Die App „Werkstatt“ haelt geladene Seiten im Speicher und laedt sie beim
+  // naechsten Oeffnen der Kachel NICHT neu (ZentraleController.seiten). Einen
+  // Service Worker, der das auffangen koennte, laesst WKWebView ohne
+  // WKAppBoundDomains nicht zu. Ergebnis am 08.10.2026: Florian startete
+  // Staufunk aus der Werkstatt und bekam tagealten Code - der neue
+  // Blitzerwarner und der Mikrofon-Knopf fehlten einfach. Also selbst
+  // nachsehen, ob eine neuere Fassung liegt, und dann neu laden.
+  var standGeprueft = 0;
+  function standPruefen() {
+    // Nie mitten in einer Fahrt und nicht waehrend der Fahrt ohne Ziel -
+    // dann lieber beim naechsten Halt.
+    if (document.hidden || ziel || tempoKmh > 20) return;
+    var jetzt = Date.now();
+    if (jetzt - standGeprueft < 300000) return;
+    standGeprueft = jetzt;
+    hol('sw.js?frisch=' + jetzt, 6000, { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.text() : ''; })
+      .then(function (t) {
+        var m = /un-(v\d+)/.exec(t);
+        if (!m || m[1] === STAND) return;
+        // Hoechstens einmal je Fassung - sonst Dauerschleife, falls STAND
+        // und sw.js mal auseinanderlaufen.
+        try {
+          if (sessionStorage.getItem('un-frisch') === m[1]) return;
+          sessionStorage.setItem('un-frisch', m[1]);
+        } catch (e) {}
+        info('Neue Fassung ' + m[1] + ' – lade neu …');
+        // Neue Adresse statt reload(): GitHub Pages haelt index.html zehn
+        // Minuten im Zwischenspeicher, ein Neuladen koennte dieselbe alte
+        // Seite bekommen.
+        location.replace(location.pathname + '?frisch=' + m[1]);
+      }, function () {});
+  }
+
   /* ------------------------------------- Hintergrund-Navi (App „Werkstatt“) */
   // In der iPhone-App „Werkstatt“ schlaeft auch diese Seite bei gesperrtem
   // Bildschirm ein. Dann spricht die App selbst weiter - mit denselben Texten
@@ -3012,8 +3052,21 @@
   function spracheEingabeAktivieren() {
     var Erk = window.SpeechRecognition || window.webkitSpeechRecognition;
     var k = $('suche-sprechen'), feld = $('suche');
-    if (!Erk) { k.hidden = true; return; }
-    var erk = null, laeuft = false;
+    // WKWebView (App "Werkstatt", fremde Browser auf iOS) LEGT
+    // webkitSpeechRecognition an, laesst es aber nicht laufen: kein
+    // Erlaubnis-Dialog, kein Ergebnis, kein Fehler. Merkmalserkennung allein
+    // ergibt dort also einen toten Knopf. Nur Safari und das Home-Symbol
+    // koennen die Erkennung wirklich. Ausweg in der App: das Diktat der
+    // iPhone-Tastatur - deshalb Feld anfassen und darauf hinweisen.
+    function tastaturWeg() {
+      laeuft = false;
+      k.classList.remove('hoert');
+      feld.placeholder = 'Ziel eingeben';
+      feld.focus();
+      info('Diktat: Mikrofon auf der iPhone-Tastatur antippen');
+    }
+    var erk = null, laeuft = false, wache = null;
+    if (!Erk || window.funkNativ) { k.onclick = tastaturWeg; return; }
     k.onclick = function () {
       if (laeuft) { try { erk.stop(); } catch (e) {} return; }
       // Sonst diktiert die App ihre eigene Ansage mit
@@ -3025,6 +3078,7 @@
       erk.maxAlternatives = 1;
       erk.onstart = function () {
         laeuft = true;
+        clearTimeout(wache);
         k.classList.add('hoert');
         feld.placeholder = 'Sprich das Ziel …';
       };
@@ -3039,18 +3093,25 @@
         }
       };
       erk.onerror = function (e) {
-        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-          info('Mikrofon nicht erlaubt – für diese Seite freigeben');
-        } else if (e.error === 'no-speech') {
-          info('Nichts gehört');
-        }
+        clearTimeout(wache);
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') tastaturWeg();
+        else if (e.error === 'no-speech') info('Nichts gehört');
       };
       erk.onend = function () {
         laeuft = false;
+        clearTimeout(wache);
         k.classList.remove('hoert');
         feld.placeholder = 'Ziel eingeben';
       };
-      try { erk.start(); } catch (e) { laeuft = false; }
+      // Startet die Erkennung gar nicht (stumm verweigert), nach zwei
+      // Sekunden auf das Tastatur-Diktat umlenken statt nichts zu tun.
+      clearTimeout(wache);
+      wache = setTimeout(function () {
+        if (laeuft) return;
+        try { erk.abort(); } catch (e) {}
+        tastaturWeg();
+      }, 2000);
+      try { erk.start(); } catch (e) { tastaturWeg(); }
     };
   }
 
@@ -3311,8 +3372,11 @@
     }
     holen();
     document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState === 'visible' && !sperre) holen();
+      if (document.visibilityState !== 'visible') return;
+      if (!sperre) holen();
+      standPruefen();
     });
+    setTimeout(standPruefen, 4000);
     // iOS gibt die Sprachausgabe erst frei, wenn ein speak() direkt aus
     // einer Beruehrung kommt (touchend zaehlt, pointerdown nicht). Sonst
     // bleibt das Navi nach dem Start stumm - die erste Ansage kommt ja aus
