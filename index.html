@@ -10,12 +10,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Staufunk">
-  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=39">
+  <link rel="apple-touch-icon" href="icons/Icon-180.png?v=40">
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <link rel="manifest" href="manifest.json">
   <title>Staufunk</title>
-  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=39">
-  <link rel="stylesheet" href="stil.css?v=39">
+  <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css?v=40">
+  <link rel="stylesheet" href="stil.css?v=40">
 </head>
 <body>
 
@@ -66,6 +66,18 @@
                spellcheck="false" enterkeyhint="go">
         <button id="hausnr-los">Los</button>
         <button id="hausnr-ohne">ohne Nr.</button>
+      </div>
+    </div>
+
+    <!-- Favorit anlegen: Name dazu, damit "Zuhause" in der Liste steht -->
+    <div id="fav" hidden>
+      <div id="fav-wo"></div>
+      <div class="hausnr-reihe">
+        <input id="fav-feld" type="text" placeholder="Name, z. B. Zuhause"
+               autocomplete="off" autocorrect="off" autocapitalize="words"
+               spellcheck="false" enterkeyhint="done">
+        <button id="fav-los">Speichern</button>
+        <button id="fav-weg">Abbrechen</button>
       </div>
     </div>
 
@@ -180,11 +192,11 @@
     <p id="s-stand"></p>
   </div>
 
-  <script src="vendor/maplibre/maplibre-gl.js?v=39"></script>
-  <script src="verkehr.js?v=39"></script>
+  <script src="vendor/maplibre/maplibre-gl.js?v=40"></script>
+  <script src="verkehr.js?v=40"></script>
   <!-- tut nichts, ausser die Adresse enthaelt ?pruefstand -->
-  <script src="pruefstand.js?v=39"></script>
-  <script src="app.js?v=39"></script>
+  <script src="pruefstand.js?v=40"></script>
+  <script src="app.js?v=40"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {

@@ -21,7 +21,7 @@
 
   /* ------------------------------------------------------------ Grundwerte */
   // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
-  var STAND = 'v39';
+  var STAND = 'v40';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -1422,6 +1422,7 @@
     $('suche-loeschen').hidden = true;
     $('vorschlaege').hidden = true;
     hausnrSchliessen();
+    favSchliessen();
     ersatzfahne(false);
     fahrmodusAnwenden();
     info('Ziel gelöscht');
@@ -2865,6 +2866,87 @@
       .catch(function () { return []; });
   }
 
+  /* ------------------------------------------------------ Koordinaten als Ziel */
+  // Angenommen werden "48.5216, 9.0576", "48,5216 9,0576", "N 48 31.3 E 9 3.5",
+  // 48°31'17"N 9°03'27"E und ein kopierter Karten-Link (geo:, ?q=, /@48.5,9.0).
+  function zahlVon(x) { return x == null ? 0 : parseFloat(String(x).replace(',', '.')); }
+  function koordPruefen(lat, lon) {
+    if (isNaN(lat) || isNaN(lon)) return null;
+    if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+    if (!lat && !lon) return null;          // "0, 0" ist ein Tippfehler, kein Ziel
+    return { lat: lat, lon: lon };
+  }
+  function koordLesen(text) {
+    var t = (text || '').trim();
+    if (!t) return null;
+    // Kopierter Karten-Link: nur den Zahlenteil herausziehen
+    var url = /(?:@|[?&](?:q|ll|mlat|daddr|destination)=|geo:)\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/.exec(t);
+    if (url) return koordPruefen(parseFloat(url[1]), parseFloat(url[2]));
+    // Buchstaben ausser Himmelsrichtungen bedeuten: das ist ein Name.
+    // Sonst wuerde "Bahnhofstrasse 48" als Koordinate gelesen.
+    if (/[a-z\u00e4\u00f6\u00fc\u00df]/i.test(t.replace(/[nsewo]/gi, ''))) return null;
+    // In Himmelsrichtungen und Zahlen zerlegen. Grad/Minuten/Sekunden kommen
+    // mit und ohne Zeichen vor: 48\u00b031'17"N genauso wie N 48 31.3.
+    var roh = t.match(/[nsewo]|-?\d{1,3}(?:[.,]\d+)?/gi) || [];
+    var gruppen = [], cur = null;
+    roh.forEach(function (tok) {
+      if (/[nsewo]/i.test(tok)) {
+        // Richtung hinter den Zahlen schliesst die Gruppe ab, davor eroeffnet sie
+        if (cur && cur.nums.length) { if (!cur.r) cur.r = tok.toLowerCase(); cur = null; }
+        else { cur = { r: tok.toLowerCase(), nums: [] }; gruppen.push(cur); }
+      } else {
+        if (!cur) { cur = { r: null, nums: [] }; gruppen.push(cur); }
+        cur.nums.push(zahlVon(tok));
+      }
+    });
+    function ausGruppe(g, welche) {
+      var d = g.nums[welche] || 0, v;
+      if (welche === 0 && g.nums.length > 1) {
+        // eine Gruppe mit Richtung: Grad, Minuten, Sekunden
+        v = Math.abs(d) + (g.nums[1] || 0) / 60 + (g.nums[2] || 0) / 3600;
+      } else v = Math.abs(d);
+      if (d < 0) v = -v;
+      if (g.r === 's' || g.r === 'w') v = -Math.abs(v);
+      return { wert: v,
+               achse: (g.r === 'n' || g.r === 's') ? 'b' : (g.r ? 'l' : null) };
+    }
+    var komp = [];
+    if (gruppen.length >= 2) {
+      komp = [ausGruppe(gruppen[0], 0), ausGruppe(gruppen[1], 0)];
+    } else if (gruppen.length === 1 && gruppen[0].nums.length >= 2) {
+      // Keine Richtung dabei: zwei nackte Zahlen sind Breite und Laenge
+      var g = gruppen[0];
+      komp = [{ wert: g.nums[0], achse: null }, { wert: g.nums[1], achse: null }];
+      if (g.r === 's' || g.r === 'w') komp[0].wert = -Math.abs(komp[0].wert);
+      if (g.r) komp[0].achse = (g.r === 'n' || g.r === 's') ? 'b' : 'l';
+    }
+    if (komp.length < 2) return null;
+    var a = komp[0], b = komp[1], lat, lon;
+    if (a.achse === 'l' || b.achse === 'b') { lat = b.wert; lon = a.wert; }
+    else { lat = a.wert; lon = b.wert; }
+    // Ohne Richtung ist die Breite zuerst gemeint - ausser sie kann keine
+    // Breite sein (> 90\u00b0), dann war es lon,lat wie bei GeoJSON.
+    if (Math.abs(lat) > 90 && Math.abs(lon) <= 90) { var h = lat; lat = lon; lon = h; }
+    return koordPruefen(lat, lon);
+  }
+  function koordText(k) {
+    // Bewusst mit Punkt und ohne Komma: Zielnamen werden ueberall mit
+    // split(',')[0] gekuerzt, ein deutsches Komma wuerde "48,5216" zu "48".
+    return k.lat.toFixed(5) + ' \u00b7 ' + k.lon.toFixed(5);
+  }
+
+  // Favoriten, letzte Ziele und Koordinaten landen alle hier - je nachdem,
+  // ob gerade ein Zwischenziel gesucht wird.
+  function zielOderStopp(lat, lon, name) {
+    $('vorschlaege').hidden = true;
+    $('suche').blur();
+    if (stoppmodus) {
+      stoppmodus = false; knopfStand();
+      stoppHinzufuegen(lat, lon, name);
+      $('suche').value = zielName.split(',')[0];
+    } else zielSetzen(lat, lon, name);
+  }
+
   function sucheAktivieren() {
     var feld = $('suche'), liste = $('vorschlaege');
 
@@ -2873,6 +2955,18 @@
       $('suche-loeschen').hidden = !feld.value;
       hausnrSchliessen();
       var text = feld.value.trim();
+      // Koordinaten brauchen keine Suche - sofort anbieten, ohne Verzoegerung
+      var k = koordLesen(text);
+      if (k) {
+        liste.innerHTML = '';
+        var z = document.createElement('div');
+        z.textContent = '📍 ' + koordText(k) +
+                        (standort ? ' · ' + wegText(abstand(standort, [k.lat, k.lon])) : '');
+        z.onclick = function () { zielOderStopp(k.lat, k.lon, koordText(k)); };
+        liste.appendChild(z);
+        liste.hidden = false;
+        return;
+      }
       if (text.length < 3) { liste.hidden = true; return; }
       // Nominatim erlaubt höchstens eine Anfrage pro Sekunde - deshalb
       // Verzögerung und zusätzliche Mindestpause.
@@ -2958,25 +3052,73 @@
       }, 600);
     });
 
-    // Leeres Feld antippen zeigt die letzten Ziele - die meisten Fahrten
-    // gehen immer wieder an dieselben Orte.
+    // Leeres Feld antippen zeigt erst die Favoriten, dann die letzten Ziele -
+    // die meisten Fahrten gehen immer wieder an dieselben Orte.
     feld.addEventListener('focus', function () {
-      hausnrSchliessen();
+      hausnrSchliessen(); favSchliessen();
       if (feld.value.trim()) return;
-      var alte = [];
+      var favs = favHolen(), alte = [];
       try { alte = JSON.parse(geholt('ziele', '[]')); } catch (e) {}
-      if (!alte.length) return;
       liste.innerHTML = '';
-      alte.forEach(function (z) {
-        var d = document.createElement('div');
-        d.textContent = '↺ ' + z.n;
-        d.onclick = function () {
-          liste.hidden = true; feld.blur();
-          zielSetzen(z.lat, z.lon, z.n);
-        };
-        liste.appendChild(d);
+
+      favs.forEach(function (f) {
+        zeile(favSymbol(f.n) + ' ' + f.n, [f.lat, f.lon],
+              function () { zielOderStopp(f.lat, f.lon, f.n); }, f);
       });
-      liste.hidden = false;
+      // Was schon Favorit ist, nicht noch einmal als "letztes Ziel"
+      alte.filter(function (z) {
+        return !favs.some(function (f) {
+          return abstand([f.lat, f.lon], [z.lat, z.lon]) < 120;
+        });
+      }).forEach(function (z) {
+        zeile('↺ ' + z.n, [z.lat, z.lon],
+              function () { zielOderStopp(z.lat, z.lon, z.n); }, null);
+      });
+      // Neuen Favoriten anlegen: aus dem laufenden Ziel oder vom Standort aus -
+      // vor der eigenen Haustuer ist das bequemer als die Adresse zu tippen.
+      if (ziel) {
+        zeile('⭐ Ziel als Favorit speichern', null, function () {
+          favFragen(ziel[0], ziel[1], (zielName || '').split(',')[0],
+                    zielName || 'Ziel');
+        }, null);
+      } else if (standort) {
+        zeile('⭐ Hier als Favorit speichern', null, function () {
+          favFragen(standort[0], standort[1], '', 'aktueller Standort');
+        }, null);
+      }
+      liste.hidden = !liste.children.length;
+
+      function zeile(text, ort, tun, fav) {
+        var d = document.createElement('div');
+        var t = document.createElement('span');
+        t.className = 'txt';
+        t.textContent = text;
+        d.className = 'mit-weg';
+        d.appendChild(t);
+        // Entfernung in eigenem Feld: bei langen Namen wird der Name
+        // gekuerzt, die Entfernung bleibt stehen - nach ihr wird ausgesucht
+        if (ort && standort) {
+          var w = document.createElement('span');
+          w.className = 'weg-wert';
+          w.textContent = '· ' + wegText(abstand(standort, ort));
+          d.appendChild(w);
+        }
+        d.onclick = tun;
+        if (fav) {
+          var x = document.createElement('span');
+          x.className = 'fav-weg';
+          x.textContent = '✕';
+          x.onclick = function (e) {
+            e.stopPropagation();
+            favSichern(favHolen().filter(function (g) { return g.n !== fav.n; }));
+            d.remove();
+            info('Favorit „' + fav.n + '“ gelöscht');
+            if (!liste.children.length) liste.hidden = true;
+          };
+          d.appendChild(x);
+        }
+        liste.appendChild(d);
+      }
     });
 
     feld.addEventListener('blur', function () {
@@ -2984,6 +3126,7 @@
     });
     $('suche-loeschen').onclick = zielLoeschen;
     hausnrAktivieren();
+    favAktivieren();
     spracheEingabeAktivieren();
   }
 
@@ -3049,6 +3192,63 @@
   /* --------------------------------------------------------- Ziel ansagen */
   // Tippen im Auto ist nichts. Safari kann seit iOS 14.5 Spracherkennung;
   // wo sie fehlt (Firefox), verschwindet der Knopf einfach.
+
+  /* -------------------------------------------------------------- Favoriten */
+  // Immer gleiche Ziele (Zuhause, Arbeit) sollen einen Tipp kosten, nicht eine
+  // Suche. Sie liegen in localStorage und bewusst NICHT im Code: das Repo ist
+  // oeffentlich, Florians Privatadresse gehoert nicht hinein.
+  function favHolen() {
+    try {
+      var l = JSON.parse(geholt('favoriten', '[]'));
+      return Array.isArray(l) ? l.filter(function (f) {
+        return f && f.n && typeof f.lat === 'number' && typeof f.lon === 'number';
+      }) : [];
+    } catch (e) { return []; }
+  }
+  function favSichern(l) { merken('favoriten', JSON.stringify(l.slice(0, 12))); }
+  function favSymbol(n) {
+    var t = (n || '').toLowerCase();
+    if (/zuhaus|daheim|heim|haus/.test(t)) return '\ud83c\udfe0';
+    if (/arbeit|b\u00fcro|buero|job|werk/.test(t)) return '\ud83d\udcbc';
+    if (/mama|papa|eltern|oma|opa/.test(t)) return '\u2764\ufe0f';
+    return '\u2b50';
+  }
+  var favOrt = null;
+  function favFragen(lat, lon, name, was) {
+    favOrt = { lat: lat, lon: lon };
+    $('vorschlaege').hidden = true;
+    hausnrSchliessen();
+    $('fav-wo').textContent = was;
+    $('fav').hidden = false;
+    var f = $('fav-feld');
+    f.value = name || '';
+    f.focus();
+    f.select();
+  }
+  function favSchliessen() {
+    favOrt = null;
+    var e = $('fav');
+    if (e) e.hidden = true;
+  }
+  function favSpeichern() {
+    var o = favOrt, n = $('fav-feld').value.trim();
+    if (!o) return;
+    if (!n) { $('fav-feld').focus(); return; }
+    var l = favHolen().filter(function (f) { return f.n !== n; });
+    l.unshift({ n: n, lat: o.lat, lon: o.lon });
+    favSichern(l);
+    favSchliessen();
+    $('suche').blur();
+    info('Favorit \u201e' + n + '\u201c gespeichert');
+  }
+  function favAktivieren() {
+    $('fav-weg').onclick = favSchliessen;
+    $('fav-los').onclick = favSpeichern;
+    $('fav-feld').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); favSpeichern(); }
+    });
+  }
+
   function spracheEingabeAktivieren() {
     var Erk = window.SpeechRecognition || window.webkitSpeechRecognition;
     var k = $('suche-sprechen'), feld = $('suche');

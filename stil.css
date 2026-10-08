@@ -103,16 +103,16 @@ html, body {
 @keyframes pulsen { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
 
 /* ------------------------------------------------------------- Hausnummer */
-#hausnr {
+#hausnr, #fav {
   background: rgba(38,44,52,.98); border-radius: 12px;
   border: 1px solid rgba(255,255,255,.12); padding: 10px 12px;
   display: flex; flex-direction: column; gap: 8px;
 }
-#hausnr[hidden] { display: none; }
-#hausnr-wo { font-size: 14px; font-weight: 560; color: rgba(242,244,246,.9);
+#hausnr[hidden], #fav[hidden] { display: none; }
+#hausnr-wo, #fav-wo { font-size: 14px; font-weight: 560; color: rgba(242,244,246,.9);
              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hausnr-reihe { display: flex; gap: 7px; }
-#hausnr-feld {
+#hausnr-feld, #fav-feld {
   flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px;
   border: 1px solid rgba(255,255,255,.14);
   background: rgba(24,28,34,.95); color: #f2f4f6;
@@ -124,7 +124,7 @@ html, body {
   border: 1px solid rgba(255,255,255,.14);
   background: rgba(38,44,52,.95); color: #f2f4f6;
 }
-#hausnr-los { background: #1f6feb; border-color: #1f6feb; font-weight: 600; }
+#hausnr-los, #fav-los { background: #1f6feb; border-color: #1f6feb; font-weight: 600; }
 
 #vorschlaege {
   max-height: 42vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
@@ -139,6 +139,16 @@ html, body {
 }
 #vorschlaege div:last-child { border-bottom: 0; }
 #vorschlaege div:active { background: rgba(255,255,255,.09); }
+/* Favoritenzeile: Name darf gekuerzt werden, das Kreuz bleibt sichtbar */
+#vorschlaege div.mit-weg { display: flex; align-items: center; gap: 6px; padding-right: 2px; }
+#vorschlaege div.mit-weg .txt {
+  flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#vorschlaege div.mit-weg .weg-wert { flex: 0 0 auto; opacity: .75; margin-left: .45em; }
+#vorschlaege .fav-weg {
+  flex: none; padding: 4px 12px; font-size: 15px; color: rgba(242,244,246,.45);
+}
+#vorschlaege .fav-weg:active { color: #ff7b72; }
 
 /* Variantenwahl: drei Kacheln nebeneinander, die ausgewaehlte hebt sich ab */
 #varianten { display: flex; gap: 7px; }
@@ -358,6 +368,6 @@ html, body {
 #kartenmenue button:active { background: rgba(255,255,255,.1); }
 
 /* Navigationsmodus (naviModusPruefen): beim Fahren nur Ankunftszeile + Knoepfe */
-body.navi #suchzeile, body.navi #vorschlaege, body.navi #hausnr,
+body.navi #suchzeile, body.navi #vorschlaege, body.navi #hausnr, body.navi #fav,
 body.navi #stoppliste, body.navi #varianten { display: none; }
 body.navi #status { font-size: 14px; opacity: .9; }
