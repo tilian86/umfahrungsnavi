@@ -193,7 +193,18 @@
       gesehen[b.id] = true;
       raus.push(b);
     });
-    return raus;
+    // Nutzer melden feste Kaesten regelmaessig als mobile Blitzer. Dann liegen
+    // zwei Eintraege fast am selben Ort, und weil der Ansage-Schluessel die
+    // Position auf ~1 m genau nimmt, kaeme die Ansage zweimal ("Blitzer,
+    // Tempo 50" und gleich danach "mobiler Blitzer"). Steht ein fester Kasten
+    // in 80 m, fliegt die Nutzermeldung raus - der redaktionelle Eintrag ist
+    // der verlaesslichere, er bringt Tempo und Beschreibung mit.
+    var feste = raus.filter(function (b) { return !b.mobil; });
+    if (!feste.length) return raus;
+    return raus.filter(function (b) {
+      if (!b.mobil) return true;
+      return !feste.some(function (f) { return abstand(b.ort, f.ort) < 80; });
+    });
   }
 
   function vierteln(boxen) {
