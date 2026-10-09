@@ -21,7 +21,7 @@
 
   /* ------------------------------------------------------------ Grundwerte */
   // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
-  var STAND = 'v43';
+  var STAND = 'v44';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -3312,11 +3312,16 @@
             nativFertig();
             if (t) feld.dispatchEvent(new Event('input'));
           },
-          fehler: function (grund) {
+          fehler: function (grund, code) {
             nativFertig();
             if (grund === 'nichts') info('Nichts gehört');
             else if (grund === 'netz') info('Kein Netz für die Spracherkennung');
-            else tastaturWeg();
+            else {
+              // Sonst stuende man vor einem stummen Knopf: sagen, was los ist,
+              // und die Tastatur aufmachen. Der Apple-Code hilft beim Suchen.
+              info('Spracherkennung klemmt' + (code ? ' (' + code + ')' : '') + ' – bitte tippen');
+              tastaturWeg();
+            }
           },
           hinweis: function (was) { if (was === 'offline') info('Ohne Netz erkannt – bitte deutlich sprechen'); }
         }).catch(function () { nativFertig(); tastaturWeg(); });
