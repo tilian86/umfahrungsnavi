@@ -52,7 +52,7 @@
   // schickt, landet in window.pruefApp - so laesst sich am Schreibtisch
   // pruefen, was die Hintergrund-Navi und das Diktat bekommen.
   if (location.search.indexOf('app') >= 0 && !window.funkNativ) {
-    var buch = { route: [], ende: 0, gesagt: [], diktat: 0, diktatRueckruf: null, letzteStop: 0 };
+    var buch = { route: [], ende: 0, gesagt: [], diktat: 0, diktatRueckruf: null, letzteStop: 0, gesprochen: [], sprechStopp: 0 };
     window.pruefApp = buch;
     var attrappe = {
       version: 'pruefstand', stand: 'Prüfstand', kachel: 'staufunk',
@@ -60,6 +60,8 @@
       erinnern: function () { return Promise.resolve('p1'); },
       vergessen: function () { return Promise.resolve(); },
       bildschirmWach: function () { return Promise.resolve(); },
+      sprechen: function (t) { buch.gesprochen.push(t); return Promise.resolve(); },
+      sprechStopp: function () { buch.sprechStopp++; return Promise.resolve(); },
       diktat: {
         start: function (r) { buch.diktat++; buch.diktatRueckruf = r || {}; return Promise.resolve(); },
         stop: function () { buch.letzteStop++; return Promise.resolve(); },

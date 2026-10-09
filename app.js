@@ -21,7 +21,7 @@
 
   /* ------------------------------------------------------------ Grundwerte */
   // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
-  var STAND = 'v46';
+  var STAND = 'v47';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -2863,14 +2863,31 @@
     } catch (e) {}
   }
 
+  // In der App "Werkstatt" spricht auch vorne die App (funkNativ.sprechen):
+  // nur so wird Spotify & Co. waehrend der Ansage leiser - speechSynthesis
+  // legt die Stimme dort bloss darueber. Aeltere App-Fassungen und der
+  // Browser sprechen wie bisher selbst.
+  var appSpricht = !!(window.funkNativ && window.funkNativ.sprechen);
   function sagen(t) {
-    if (!sprache || !('speechSynthesis' in window) || t === letzterText) return;
+    if (!sprache || t === letzterText) return;
     if (naviNativ && document.hidden) return;   // hinten spricht die App (NaviKern)
+    if (appSpricht) {
+      letzterText = t;
+      window.funkNativ.sprechen(t, { rate: 1.05 }).catch(function () {
+        appSpricht = false; letzterText = ''; sagen(t);
+      });
+      return;
+    }
+    if (!('speechSynthesis' in window)) return;
     letzterText = t;
     tonSitzung();
     var u = new SpeechSynthesisUtterance(t);
     u.lang = 'de-DE'; u.rate = 1.05;
     window.speechSynthesis.speak(u);
+  }
+  function schweigen() {
+    if (appSpricht) window.funkNativ.sprechStopp().catch(function () {});
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
   }
 
   /* ------------------------------------------------------------ Adresssuche */
@@ -3326,7 +3343,7 @@
     if (nativDiktat) {
       k.onclick = function () {
         if (laeuft) { nativDiktat.stop().catch(function () {}); return; }
-        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        schweigen();
         laeuft = true;
         k.classList.add('hoert');
         feld.placeholder = 'Sprich das Ziel …';
@@ -3461,7 +3478,7 @@
       if (sprache) {
         // Die erste Ausgabe muss aus einer Nutzergeste kommen, sonst blockt iOS.
         letzterText = ''; sagen('Ansage an');
-      } else window.speechSynthesis.cancel();
+      } else schweigen();
       naviMelden();
     };
 
