@@ -175,8 +175,10 @@
     var fest = String(i.fixed) === '1';
     // Stillgelegte Kaesten stehen mit "inaktiv" in der Beschreibung. Eine
     // Warnung davor ist ein sicherer Fehlalarm - und einer, der das
-    // Vertrauen in alle anderen Warnungen kostet.
-    if (fest && /inaktiv/i.test(i.desc || '')) return null;
+    // Vertrauen in alle anderen Warnungen kostet. "inaktiv(?)" heisst aber
+    // nur "vielleicht": davor wird gewarnt (Wurmlingen, Hirschauer Strasse,
+    // 09.10.2026 - der Kasten fehlte, obwohl er blitzen kann).
+    if (fest && /inaktiv(?!\s*\(?\s*\?)/i.test(i.desc || '')) return null;
     return {
       id: x.id || (la.toFixed(5) + ',' + lo.toFixed(5)),
       ort: [la, lo],
