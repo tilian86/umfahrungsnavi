@@ -47,6 +47,35 @@
   };
   window.pruefFahrt = function () { document.getElementById('p-fahrt').click(); };
 
+  // Attrappe der Werkstatt-App: mit "?pruefstand&app" verhaelt sich die Seite
+  // wie in der iPhone-App (funkNativ ist da). Alles, was die Seite der App
+  // schickt, landet in window.pruefApp - so laesst sich am Schreibtisch
+  // pruefen, was die Hintergrund-Navi und das Diktat bekommen.
+  if (location.search.indexOf('app') >= 0 && !window.funkNativ) {
+    var buch = { route: [], ende: 0, gesagt: [], diktat: 0, diktatRueckruf: null, letzteStop: 0 };
+    window.pruefApp = buch;
+    var attrappe = {
+      version: 'pruefstand', stand: 'Prüfstand', kachel: 'staufunk',
+      vibrieren: function () { return Promise.resolve(); },
+      erinnern: function () { return Promise.resolve('p1'); },
+      vergessen: function () { return Promise.resolve(); },
+      bildschirmWach: function () { return Promise.resolve(); },
+      diktat: {
+        start: function (r) { buch.diktat++; buch.diktatRueckruf = r || {}; return Promise.resolve(); },
+        stop: function () { buch.letzteStop++; return Promise.resolve(); },
+        aus: function () { buch.diktatRueckruf = null; return Promise.resolve(); }
+      },
+      navi: {
+        route: function (d) { buch.route.push(d); return Promise.resolve(); },
+        gesagt: function (l) { buch.gesagt.push(l); return Promise.resolve(); },
+        ende: function () { buch.ende++; return Promise.resolve(); },
+        protokoll: function () { return Promise.resolve('Prüfstand: kein Protokoll'); }
+      }
+    };
+    Object.defineProperty(window, 'funkNativ', { value: Object.freeze(attrappe), configurable: true });
+    window.__funk = { an: function () {}, _ereignisse: function () {} };
+  }
+
   function schritt() {
     // Die Route kann sich während der Fahrt ändern (Neuberechnung, Stauzone).
     // Dann auf der neuen Linie beim nächstgelegenen Punkt weiterlaufen.

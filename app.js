@@ -21,7 +21,7 @@
 
   /* ------------------------------------------------------------ Grundwerte */
   // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
-  var STAND = 'v42';
+  var STAND = 'v43';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -1252,6 +1252,7 @@
       if (ziel && routePunkte.length) return;   // inzwischen Route da
       blitzer = b;
       blitzerZeichnen();
+      naviMelden();
     }, function () {
       // Abfrage misslungen (Funkloch, atudo bremst): die Gegend NICHT als
       // erledigt merken. Sonst schweigt der Warner hier zehn Minuten weiter,
@@ -2734,7 +2735,25 @@
     naviTimer = setTimeout(function () {
       naviTimer = null;
       var n = window.funkNativ.navi;
-      if (!ziel || !routePunkte.length || !sprache) { n.ende().catch(function () {}); return; }
+      if (!sprache) { n.ende().catch(function () {}); return; }
+      if (!ziel || !routePunkte.length) {
+        // Ohne Ziel kann die App keine Strecke verfolgen - aber Blitzer schon.
+        // Sonst schweigt sie bei gesperrtem Bildschirm genau da, wo man ohne
+        // Ziel faehrt: auf der Hausstrecke.
+        if (!blitzWarnen || modus !== 'auto' || !blitzer.length) {
+          n.ende().catch(function () {});
+          return;
+        }
+        naviGesagtZahl = Object.keys(gesagt).length;
+        n.route({
+          nurBlitzer: true,
+          blitzer: blitzer.map(function (b) {
+            return { ort: b.ort, mobil: !!b.mobil, tempo: b.tempo || null, richtung: b.richtung || [] };
+          }),
+          gesagt: Object.keys(gesagt)
+        }).catch(function () {});
+        return;
+      }
       naviGesagtZahl = Object.keys(gesagt).length;
       n.route({
         punkte: routePunkte,
@@ -3261,8 +3280,10 @@
     // webkitSpeechRecognition an, laesst es aber nicht laufen: kein
     // Erlaubnis-Dialog, kein Ergebnis, kein Fehler. Merkmalserkennung allein
     // ergibt dort also einen toten Knopf. Nur Safari und das Home-Symbol
-    // koennen die Erkennung wirklich. Ausweg in der App: das Diktat der
-    // iPhone-Tastatur - deshalb Feld anfassen und darauf hinweisen.
+    // koennen die Erkennung wirklich.
+    // In der Werkstatt-App hoert seit 09.10.2026 die App selbst zu
+    // (funkNativ.diktat). Ohne beides bleibt das Diktat der iPhone-Tastatur -
+    // deshalb Feld anfassen und darauf hinweisen.
     function tastaturWeg() {
       laeuft = false;
       k.classList.remove('hoert');
@@ -3271,6 +3292,45 @@
       info('Diktat: Mikrofon auf der iPhone-Tastatur antippen');
     }
     var erk = null, laeuft = false, wache = null;
+
+    // In der App "Werkstatt" hoert die App selbst zu (Diktat.swift) und
+    // schickt den Text laufend herueber - dasselbe Verhalten wie unten,
+    // nur ohne Web-Erkennung.
+    var nativDiktat = window.funkNativ && window.funkNativ.diktat;
+    if (nativDiktat) {
+      k.onclick = function () {
+        if (laeuft) { nativDiktat.stop().catch(function () {}); return; }
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        laeuft = true;
+        k.classList.add('hoert');
+        feld.placeholder = 'Sprich das Ziel …';
+        nativDiktat.start({
+          text: function (t, fertig) {
+            feld.value = t;
+            $('suche-loeschen').hidden = !t;
+            if (!fertig) return;
+            nativFertig();
+            if (t) feld.dispatchEvent(new Event('input'));
+          },
+          fehler: function (grund) {
+            nativFertig();
+            if (grund === 'nichts') info('Nichts gehört');
+            else if (grund === 'netz') info('Kein Netz für die Spracherkennung');
+            else tastaturWeg();
+          },
+          hinweis: function (was) { if (was === 'offline') info('Ohne Netz erkannt – bitte deutlich sprechen'); }
+        }).catch(function () { nativFertig(); tastaturWeg(); });
+      };
+      return;
+    }
+    function nativFertig() {
+      laeuft = false;
+      k.classList.remove('hoert');
+      feld.placeholder = 'Ziel eingeben';
+    }
+
+    // Alte App-Fassungen haben funkNativ, aber noch kein diktat: dort bleibt
+    // es bei der Tastatur, denn die Web-Erkennung ist in WKWebView tot.
     if (!Erk || window.funkNativ) { k.onclick = tastaturWeg; return; }
     k.onclick = function () {
       if (laeuft) { try { erk.stop(); } catch (e) {} return; }
