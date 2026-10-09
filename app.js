@@ -21,7 +21,7 @@
 
   /* ------------------------------------------------------------ Grundwerte */
   // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
-  var STAND = 'v44';
+  var STAND = 'v45';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -100,6 +100,9 @@
   var standort = null, kurs = null, ziel = null, zielName = '';
   var stopps = [];                       // [{ort:[lat,lon], name:''}]
   var varianten = [], variante = 0;
+  // Der Weg, der einfach durch den Stau fuehrt - Massstab fuer die
+  // gesparten Minuten in der Stoerfahne.
+  var vergleichsweg = null;
   // Was der Fahrer zuletzt SELBST gewaehlt hat. Ohne das springt jede
   // Neuberechnung zurueck auf Vorschlag 1 - die Wahl wirkte "verselbstaendigt".
   var variantenWunsch = null;
@@ -982,11 +985,26 @@
   function stoerfahne() {
     var f = $('stoerfahne');
     if (!sperren.length) { f.hidden = true; return; }
-    var min = sperren.reduce(function (a, s) { return a + (s.minuten || 0); }, 0);
     f.hidden = false;
     f.textContent = 'Umfahrung aktiv · ' + sperren.length +
                     (sperren.length === 1 ? ' Störung' : ' Störungen') +
-                    (min ? ' · ' + Math.round(min) + ' min gespart' : '') + ' ›';
+                    gespartText() + ' ›';
+  }
+
+  // Wirklich gesparte Minuten: um wie viel spaeter man ankaeme, wenn man
+  // einfach durch den Stau fuehre. Hier stand bis v44 die Summe der
+  // gemeldeten Stauminuten - die zog den Umweg selbst nicht ab und behauptete
+  // deshalb regelmaessig ein Mehrfaches (17 statt 6 Minuten). Beide Wege
+  // werden mit den GEMELDETEN Minuten gerechnet (nicht mit `zeit()`, das
+  // Hand- und Vollsperren fuer die Auswahl hochzieht) und bei jedem Aufruf
+  // neu - fallen Stoerungen weg, schrumpft die Zahl mit.
+  function gespartText() {
+    var gew = varianten[variante];
+    if (!vergleichsweg || !gew || !gew.koord) return '';
+    var durch = vergleichsweg.min + stauAuf(vergleichsweg.koord);
+    var umweg = gew.min + stauAuf(gew.koord);
+    var min = Math.round(durch - umweg);
+    return min >= 1 ? ' · ' + min + ' min gespart' : '';
   }
 
   // Fahne antippen: zur Stoerung springen und sie benennen. Bei mehreren
@@ -1501,7 +1519,8 @@
       // wenn er schneller ist als dieser Weg SAMT Stauminuten. BRouters
       // Kosten sind keine Minuten - darauf allein ist kein Verlass.
       if (ohneStau !== nogos) {
-        kandidaten.push({ zusatz: '&alternativeidx=0', marke: '', nogos: ohneStau });
+        kandidaten.push({ zusatz: '&alternativeidx=0', marke: '', nogos: ohneStau,
+                          durch: true });
       }
       // Wege-Schalter nur im Auto-Modus - das trekking-Profil kennt die
       // Parameter nicht und BRouter bricht bei unbekannten Namen ab
@@ -1528,7 +1547,7 @@
             }
             return r.json();
           })
-          .then(function (g) { return g ? { geo: g, marke: k.marke } : null; })
+          .then(function (g) { return g ? { geo: g, marke: k.marke, durch: k.durch } : null; })
           .catch(function () { return null; });
       }
 
@@ -1565,11 +1584,12 @@
         profilNeuVersucht = false;
 
         var roh = [];
+        vergleichsweg = null;
         ergebnisse.forEach(function (e) {
           var f = e && e.geo && e.geo.features && e.geo.features[0];
           if (!f || !f.geometry || !f.geometry.coordinates) return;
           var pr = f.properties || {};
-          roh.push({
+          var v = {
             marke: e.marke,
             koord: f.geometry.coordinates.map(function (c) { return [c[1], c[0]]; }),
             hinweise: pr.voicehints || [],
@@ -1578,7 +1598,10 @@
             auf: parseInt(pr['filtered ascend'] || 0, 10),
             messages: pr.messages || null,
             art: streckenArt(pr.messages)
-          });
+          };
+          // Der Weg mitten durch den Stau ist der Massstab fuer "X min gespart".
+          if (e.durch) vergleichsweg = { koord: v.koord, min: v.min };
+          roh.push(v);
         });
         if (!roh.length) {
           info(sperren.length ? 'Keine Route – Sperrzone zu gross?' : 'Keine Route gefunden');
@@ -1757,6 +1780,9 @@
   }
 
   function osrmRoute(punkte, lauf) {
+    // Der Ersatzdienst rechnet keinen Weg durch den Stau mit - also auch
+    // keine gesparten Minuten behaupten.
+    vergleichsweg = null;
     // OSRM kennt keine Sperrzonen und liefert praktisch nie Alternativen.
     // Beides laesst sich mit Zwischenpunkten nachbauen: ein Punkt seitlich
     // neben dem Stau erzwingt die Umfahrung, Punkte seitlich der Streckenmitte
@@ -3756,11 +3782,16 @@
       varianten: function () { return varianten; },
       verkehrPruefen: verkehrPruefen,
       zielSetzen: zielSetzen,
-      stauSetzen: function (lat, lon) {
-        sperreHinzufuegen({ ort: [lat, lon], radius: 220, minuten: 10,
-                            text: 'Stau von Hand', quelle: 'hand' });
+      // Ohne Quelle eine Handsperre wie der "Stau!"-Knopf. Mit 'tomtom' o.ae.
+      // eine GEMELDETE Stoerung - nur dann rechnet die App den Vergleichsweg
+      // durch den Stau mit, und nur dann gibt es gesparte Minuten zu pruefen.
+      stauSetzen: function (lat, lon, minuten, quelle) {
+        sperreHinzufuegen({ ort: [lat, lon], radius: 220, minuten: minuten || 10,
+                            text: quelle ? 'Stau gemeldet' : 'Stau von Hand',
+                            quelle: quelle || 'hand' });
         if (ziel) route();
       },
+      vergleich: function () { return vergleichsweg; },
       zustand: function () { return { fahrmodus: fahrmodus, folgen: folgen,
         zielDa: !!ziel, kurs: kurs, tempo: Math.round(tempoKmh),
         varianten: varianten.length, limit: limitAktuell,
