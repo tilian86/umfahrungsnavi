@@ -4,7 +4,7 @@
  * werden, sonst mischt GitHub Pages alte und neue Staende. Sie gehoert
  * zusammen mit den ?v=-Marken in index.html angefasst.
  */
-var VERSION = 'un-v48';
+var VERSION = 'un-v49';
 // Die ?v=-Marke im Geruest MUSS die aus index.html sein - sonst liegt im
 // Cache nur eine Fassung unter falschem Namen, und ohne Netz fehlt direkt
 // nach einem Update das Skript (weisse Seite). Deshalb aus VERSION abgeleitet.
@@ -38,6 +38,17 @@ self.addEventListener('activate', function (e) {
 // bis zu einer Minute weisser Bildschirm.
 var FRIST = 3000;
 
+// Eine Seitenadresse mit Anhang (?frisch=v49 nach einem Update, ?key=... im
+// Home-Symbol) liegt nach dem Versionswechsel nicht im neuen Cache - ohne
+// Netz gab es dann eine Fehlerseite statt der App. Fuer Seitenaufrufe greift
+// deshalb das gemerkte Geruest. Skripte bleiben streng bei ihrer ?v=-Fassung.
+function ausCache(req) {
+  return caches.match(req).then(function (r) {
+    if (r || req.mode !== 'navigate') return r;
+    return caches.match('./index.html').then(function (i) { return i || caches.match('./'); });
+  });
+}
+
 self.addEventListener('fetch', function (e) {
   var u = new URL(e.request.url);
   // Alles Fremde (Kacheln, BRouter, Nominatim) laeuft am Cache vorbei.
@@ -61,10 +72,10 @@ self.addEventListener('fetch', function (e) {
   e.respondWith(new Promise(function (fertig) {
     var erledigt = false;
     function geben(r) { if (!erledigt && r) { erledigt = true; fertig(r); } }
-    var uhr = setTimeout(function () { caches.match(e.request).then(geben); }, FRIST);
+    var uhr = setTimeout(function () { ausCache(e.request).then(geben); }, FRIST);
     netz.then(function (r) { clearTimeout(uhr); geben(r); }, function () {
       clearTimeout(uhr);
-      caches.match(e.request).then(function (r) {
+      ausCache(e.request).then(function (r) {
         if (r) geben(r);
         else if (!erledigt) { erledigt = true; fertig(Response.error()); }
       });

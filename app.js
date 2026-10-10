@@ -21,7 +21,7 @@
 
   /* ------------------------------------------------------------ Grundwerte */
   // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
-  var STAND = 'v48';
+  var STAND = 'v49';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -774,6 +774,9 @@
     // eingegebenes Ziel schwieg er also komplett. Genau das war gemeldet.
     sicher(blitzerPflegen, ll);
     sicher(blitzPruefen, ll);
+    // Ohne Route gingen die eben gewarnten Blitzer bisher nicht an die App -
+    // nach dem Sperren des Bildschirms warnte sie dann denselben noch einmal
+    if (!(ziel && routePunkte.length)) sicher(naviGesagtMelden);
     sicher(tempoEcke, ll);
     // Auch hier nachsehen, ob eine neuere Fassung liegt: ob die App
     // "Werkstatt" beim Oeffnen der Kachel visibilitychange feuert, ist nicht
@@ -1310,10 +1313,34 @@
     });
   }
 
+  // Blitzer-Marken in `gesagt` tragen die Uhrzeit der Warnung und verfallen
+  // nach zehn Minuten. Vorher galten sie, solange die Seite lebte - in der
+  // Werkstatt-App also tagelang: auf der Hausstrecke kam jeder Blitzer genau
+  // einmal und danach nie wieder.
+  var BLITZ_VERGESSEN = 600000, blitzAufgeraeumt = 0;
+  function blitzGesagt(k) {
+    var w = gesagt[k];
+    return typeof w === 'number' ? Date.now() - w < BLITZ_VERGESSEN : !!w;
+  }
+  function blitzVergessen() {
+    var jetzt = Date.now();
+    if (jetzt - blitzAufgeraeumt < 60000) return;
+    blitzAufgeraeumt = jetzt;
+    var weg = false;
+    Object.keys(gesagt).forEach(function (k) {
+      if (k.indexOf('blitz') === 0 && typeof gesagt[k] === 'number' &&
+          jetzt - gesagt[k] >= BLITZ_VERGESSEN) { delete gesagt[k]; weg = true; }
+    });
+    // Die App (NaviKern) behielte die Marke sonst: navi.route ersetzt ihre
+    // Liste, navi.gesagt ergaenzt sie nur
+    if (weg) naviMelden();
+  }
+
   // Warnt nur vor Blitzern, auf die man wirklich zufährt. OSM hält bei vielen
   // Standorten die Messrichtung fest; wo sie fehlt, wird über den Kurs
   // entschieden, um Gegenrichtungs-Fehlalarme zu vermeiden.
   function blitzPruefen(ll) {
+    blitzVergessen();
     if (!blitzWarnen || modus === 'rad' || !blitzer.length) { $('blitzfahne').hidden = true; return; }
     // Sichtweite nach Tempo statt fester 500 m: bei 100 km/h waren 500 m nur
     // 18 Sekunden, die Ansage bei 350 m gerade 12 - zu knapp, um noch ruhig
@@ -1339,8 +1366,17 @@
                     ' in ' + Math.round(nd / 10) * 10 + ' m' +
                     (naechster.tempo ? ' · Tempo ' + naechster.tempo : '');
     var schluessel = 'blitz' + naechster.ort[0].toFixed(5);
-    if (nd < sicht * 0.75 && !gesagt[schluessel]) {
-      gesagt[schluessel] = true;
+    if (nd < sicht * 0.75 && !blitzGesagt(schluessel)) {
+      // Eintraege an derselben Stelle (je Fahrtrichtung einer, doppelt
+      // gemeldet) gelten mit als gewarnt - 80 m wie beim Entdoppeln
+      var jetzt = Date.now();
+      blitzer.forEach(function (b) {
+        if (abstand(b.ort, naechster.ort) < 80) gesagt['blitz' + b.ort[0].toFixed(5)] = jetzt;
+      });
+      // Gleicher Wortlaut wie beim vorigen Blitzer ("Achtung, Blitzer. Tempo
+      // 50") ist trotzdem eine neue Warnung - die Wiederholsperre in sagen()
+      // schluckte sie bisher
+      letzterText = '';
       sagen('Achtung, ' + (naechster.mobil ? 'mobiler Blitzer' : 'Blitzer') +
             (naechster.tempo ? '. Tempo ' + naechster.tempo : ' voraus'));
     }
@@ -2014,7 +2050,7 @@
     var alteHinweise = hinweise, altesGesagt = gesagt;
     gesagt = {};
     // Blitzer haengen am Ort, nicht an der Route: schon gewarnt bleibt gewarnt
-    Object.keys(altesGesagt).forEach(function (k) { if (k.indexOf('blitz') === 0) gesagt[k] = true; });
+    Object.keys(altesGesagt).forEach(function (k) { if (k.indexOf('blitz') === 0) gesagt[k] = altesGesagt[k]; });
     hinweise = hinweiseBauen(v);
     // Wo auf der Strecke liegt jeder Hinweis (Meter ab Start)? Daran misst
     // der Banner den Weg bis zur Abbiegung - nicht an der Luftlinie.
@@ -2137,6 +2173,9 @@
       // Wechselt das Limit gleich wieder (30-40-30), nicht jedes Mal
       if (limitGesagt !== limitAktuell && Date.now() - limitGesagtUm > 30000) {
         limitGesagt = limitAktuell; limitGesagtUm = Date.now();
+        // Sonst blieb die zweite Warnung stumm, wenn seit der ersten nichts
+        // anderes gesagt wurde (gleicher Text = Wiederholsperre in sagen())
+        letzterText = '';
         sagen('Tempolimit ' + limitAktuell);
       }
     } else if (tempoKmh <= limitAktuell) limitGesagt = null;
@@ -2812,7 +2851,11 @@
   // (frischen) Position auch neu.
   function naviStand(m) {
     if (m.umgeleitet) { naviNeu = true; return; }
-    (m.gesagt || []).forEach(function (k) { gesagt[k] = true; });
+    (m.gesagt || []).forEach(function (k) {
+      // Blitzer mit Uhrzeit, damit auch die Warnung der App verfaellt
+      if (k.indexOf('blitz') === 0) { if (!blitzGesagt(k)) gesagt[k] = Date.now(); }
+      else gesagt[k] = true;
+    });
     naviGesagtZahl = Object.keys(gesagt).length;
   }
 
