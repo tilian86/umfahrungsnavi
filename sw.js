@@ -4,11 +4,15 @@
  * werden, sonst mischt GitHub Pages alte und neue Staende. Sie gehoert
  * zusammen mit den ?v=-Marken in index.html angefasst.
  */
-var VERSION = 'un-v47';
+var VERSION = 'un-v48';
+// Die ?v=-Marke im Geruest MUSS die aus index.html sein - sonst liegt im
+// Cache nur eine Fassung unter falschem Namen, und ohne Netz fehlt direkt
+// nach einem Update das Skript (weisse Seite). Deshalb aus VERSION abgeleitet.
+var V = VERSION.replace('un-v', '');
 var GERUEST = [
-  './', './index.html', './app.js?v=37', './stil.css?v=37',
-  './verkehr.js?v=37', './pruefstand.js?v=37', './profil/umfahrung.brf',
-  './vendor/maplibre/maplibre-gl.js?v=37', './vendor/maplibre/maplibre-gl.css?v=37',
+  './', './index.html', './app.js?v=' + V, './stil.css?v=' + V,
+  './verkehr.js?v=' + V, './pruefstand.js?v=' + V, './profil/umfahrung.brf',
+  './vendor/maplibre/maplibre-gl.js?v=' + V, './vendor/maplibre/maplibre-gl.css?v=' + V,
   './manifest.json', './icons/Icon-192.png'
 ];
 
