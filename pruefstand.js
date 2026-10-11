@@ -52,7 +52,8 @@
   // schickt, landet in window.pruefApp - so laesst sich am Schreibtisch
   // pruefen, was die Hintergrund-Navi und das Diktat bekommen.
   if (location.search.indexOf('app') >= 0 && !window.funkNativ) {
-    var buch = { route: [], ende: 0, gesagt: [], diktat: 0, diktatRueckruf: null, letzteStop: 0, gesprochen: [], sprechStopp: 0 };
+    var buch = { route: [], ende: 0, gesagt: [], diktat: 0, diktatRueckruf: null, letzteStop: 0, gesprochen: [], sprechStopp: 0,
+                 uhr: { stand: [], ereignis: [], ende: 0 } };
     window.pruefApp = buch;
     var attrappe = {
       version: 'pruefstand', stand: 'Prüfstand', kachel: 'staufunk',
@@ -66,6 +67,12 @@
         start: function (r) { buch.diktat++; buch.diktatRueckruf = r || {}; return Promise.resolve(); },
         stop: function () { buch.letzteStop++; return Promise.resolve(); },
         aus: function () { buch.diktatRueckruf = null; return Promise.resolve(); }
+      },
+      // Apple Watch: was die Seite der Uhr-Bruecke schickt (window.pruefApp.uhr)
+      uhr: {
+        stand: function (d) { buch.uhr.stand.push(d); return Promise.resolve(); },
+        ereignis: function (art, d) { buch.uhr.ereignis.push(Object.assign({ art: art }, d)); return Promise.resolve(); },
+        ende: function () { buch.uhr.ende++; return Promise.resolve(); }
       },
       navi: {
         route: function (d) { buch.route.push(d); return Promise.resolve(); },

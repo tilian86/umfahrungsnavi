@@ -21,7 +21,7 @@
 
   /* ------------------------------------------------------------ Grundwerte */
   // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
-  var STAND = 'v49';
+  var STAND = 'v50';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -764,7 +764,7 @@
     if (ziel && !gesagt.ziel && Date.now() - fahrtGemerkt > 60000) fahrtMerken();
     if (ziel && routePunkte.length) {
       [bannerAktualisieren, abweichungPruefen, fahrdatenZeigen,
-       durchfahrenPruefen, alternativenRaeumen].forEach(function (f) { sicher(f, ll); });
+       durchfahrenPruefen, alternativenRaeumen, uhrStandSenden].forEach(function (f) { sicher(f, ll); });
       if (blitzBisS && lotS > blitzBisS - 5000) sicher(blitzerNachladen);
       if (naviNeu) { naviNeu = false; letzteNeu = Date.now(); abseitsZaehler = 0; route(); }
       else sicher(naviGesagtMelden);
@@ -1204,6 +1204,7 @@
                              + 'Stadtstraßen fehlt der TomTom-Schlüssel.');
           }
         }
+        if (neu.length) uhrStauMelden(neu);
         if (neu.length && sprache) {
           var min = Math.round(neu.reduce(function (a, s) { return a + s.minuten; }, 0));
           letzterText = '';
@@ -1379,6 +1380,12 @@
       letzterText = '';
       sagen('Achtung, ' + (naechster.mobil ? 'mobiler Blitzer' : 'Blitzer') +
             (naechster.tempo ? '. Tempo ' + naechster.tempo : ' voraus'));
+      // Die Uhr warnt auch ohne Ansage. Gleiche Kennung wie in der App (NaviKern):
+      // warnen beide, vibriert es trotzdem nur einmal.
+      uhrEreignis('blitzer', {
+        kennung: uhrFahrt + '-' + schluessel, meter: Math.round(nd),
+        text: (naechster.mobil ? 'Mobiler Blitzer' : 'Blitzer') + (naechster.tempo ? ' · Tempo ' + naechster.tempo : '')
+      });
     }
   }
 
@@ -1468,6 +1475,7 @@
     ziel = null; zielName = ''; varianten = []; hinweise = [];
     routePunkte = []; routeRefs = []; blitzer = []; blitzBisS = 0;
     fahrtMerken();
+    uhrEnde(); uhrFahrt = 0;
     naviMelden();
     if (zielMarke) { zielMarke.remove(); zielMarke = null; }
     routenZeichnen();
@@ -1677,6 +1685,10 @@
         if (ausVerkehr && stauAufRoute() >= schwelle) {
           letzterText = '';
           sagen('Umfahrung lohnt sich nicht, ich bleibe auf der Strecke.');
+          uhrEreignis('stau', { kennung: uhrFahrt + '-bleibt', text: 'Umfahrung lohnt sich nicht' });
+        } else if (ausVerkehr && sperren.some(istAuto)) {
+          uhrEreignis('umfahrung', { kennung: uhrFahrt + '-umfahrung',
+                                     text: 'Umfahrung' + gespartText() });
         }
         // Kennungen und Blitzer fuer den Weg, der wirklich gefahren wird
         umgebungNachladen(varianten[variante]);
@@ -2030,6 +2042,7 @@
     variante = i;
     var v = varianten[i];
     if (!v) return;
+    uhrNeueStrecke();
 
     routenZeichnen();
 
@@ -2177,6 +2190,7 @@
         // anderes gesagt wurde (gleicher Text = Wiederholsperre in sagen())
         letzterText = '';
         sagen('Tempolimit ' + limitAktuell);
+        uhrEreignis('tempolimit', { kennung: uhrFahrt + '-tempo' + Math.floor(Date.now() / 1000), text: 'Tempo ' + limitAktuell });
       }
     } else if (tempoKmh <= limitAktuell) limitGesagt = null;
   }
@@ -2616,7 +2630,7 @@
 
   function bannerAktualisieren(ll) {
     var banner = $('banner');
-    if (!ziel || !routePunkte.length) { banner.hidden = true; return; }
+    if (!ziel || !routePunkte.length) { uhrAnzeige = null; banner.hidden = true; return; }
 
     // Entfernung zum naechsten Hinweis ENTLANG der Strecke. Die Luftlinie
     // taeuscht in Kurven, Rampen und Schleifen: dort war ein spaeterer
@@ -2650,7 +2664,8 @@
       $('banner-entfernung').textContent = 'Ziel';
       $('banner-anweisung').textContent = zielName.split(',')[0] || 'erreicht';
       ['banner-strasse', 'banner-danach', 'banner-spuren', 'banner-aktuell'].forEach(function (id) { $(id).hidden = true; });
-      if (!gesagt.ziel) { gesagt.ziel = true; sagen('Ziel erreicht'); merken('fahrt', ''); }
+      uhrAnzeige = null;
+      if (!gesagt.ziel) { gesagt.ziel = true; sagen('Ziel erreicht'); merken('fahrt', ''); uhrZiel(); }
       return;
     }
 
@@ -2670,6 +2685,7 @@
       $('banner-entfernung').textContent = 'in ' + wegText(bisZiel);
       $('banner-anweisung').textContent = 'Ziel · ' + (zielName.split(',')[0] || 'erreicht');
       ['banner-strasse', 'banner-danach', 'banner-spuren'].forEach(function (id) { $(id).hidden = true; });
+      uhrAnzeige = { h: null };
       return;
     }
 
@@ -2689,6 +2705,7 @@
     // Verglichen wird mit der Strasse kurz VOR dem Manoever - nicht mit der
     // unter dem Auto, die wechselt im letzten Moment schon zur neuen.
     var st = h.strasse, neuName = neuerName(h, hier);
+    uhrAnzeige = { h: h, idx: beste, meter: besteD, neuName: neuName };
     var zeile = [];
     if (st && st.ausfahrt) zeile.push('Ausfahrt ' + st.ausfahrt);
     if (neuName) zeile.push('auf ' + neuName);
@@ -2719,9 +2736,11 @@
     if (besteD < Math.max(modus === 'rad' ? 110 : 250, tempoKmh * 4.5) && !gesagt['ton' + beste]) {
       gesagt['ton' + beste] = true;
       sagen('In ' + sprechWeg(besteD) + ' ' + ansageTexte(h, neuName).ton);
+      uhrManoever('vorwarnung', 'ton' + beste, h, besteD, neuName);
     } else if (besteD < Math.max(60, tempoKmh * 1.2) && !gesagt['jetzt' + beste]) {
       gesagt['jetzt' + beste] = true;
       sagen(ansageTexte(h, neuName).jetzt);
+      uhrManoever('jetzt', 'jetzt' + beste, h, besteD, neuName);
     }
   }
 
@@ -2800,7 +2819,9 @@
     naviTimer = setTimeout(function () {
       naviTimer = null;
       var n = window.funkNativ.navi;
-      if (!sprache) { n.ende().catch(function () {}); return; }
+      // Ohne Ansage bleibt die App nur dabei, wenn die Uhr vibrieren soll UND eine
+      // Strecke da ist - ohne Ziel liefe sonst das GPS im Hintergrund fuer nichts.
+      if (!sprache && !(uhrAktiv() && ziel && routePunkte.length)) { n.ende().catch(function () {}); return; }
       if (!ziel || !routePunkte.length) {
         // Ohne Ziel kann die App keine Strecke verfolgen - aber Blitzer schon.
         // Sonst schweigt sie bei gesperrtem Bildschirm genau da, wo man ohne
@@ -2815,6 +2836,7 @@
           blitzer: blitzer.map(function (b) {
             return { ort: b.ort, mobil: !!b.mobil, tempo: b.tempo || null, richtung: b.richtung || [] };
           }),
+          sprechen: sprache, uhr: uhrAktiv(), routeId: uhrFahrt, quelle: 'Staufunk',
           gesagt: Object.keys(gesagt)
         }).catch(function () {});
         return;
@@ -2823,8 +2845,11 @@
       n.route({
         punkte: routePunkte,
         hinweise: hinweise.map(function (h) {
-          var t = ansageTexte(h, neuerName(h, null));
-          return { s: h.s, ort: h.ort, ton: t.ton, jetzt: t.jetzt };
+          var neuName = neuerName(h, null), t = ansageTexte(h, neuName);
+          // text/winkel/kreis/strasse/danach: fuer die Uhr (Pfeil, Muster, Strasse)
+          return { s: h.s, ort: h.ort, ton: t.ton, jetzt: t.jetzt,
+                   text: h.text, winkel: typeof h.winkel === 'number' && isFinite(h.winkel) ? Math.round(h.winkel) : null,
+                   kreis: !!h.kreis, strasse: uhrStrasse(h, neuName), danach: uhrDanach(h) };
         }),
         blitzer: blitzer.map(function (b) {
           return { ort: b.ort, mobil: !!b.mobil, tempo: b.tempo || null, richtung: b.richtung || [] };
@@ -2834,6 +2859,7 @@
         stopps: stopps.map(function (sp) { return sp.ort; }),
         rad: modus === 'rad',
         blitzWarnen: blitzWarnen,
+        sprechen: sprache, uhr: uhrAktiv(), routeId: uhrFahrt, quelle: 'Staufunk', dauer: uhrDauer(),
         gesagt: Object.keys(gesagt)
       }).catch(function () {});
     }, 800);
@@ -2857,6 +2883,179 @@
       else gesagt[k] = true;
     });
     naviGesagtZahl = Object.keys(gesagt).length;
+  }
+
+  /* ------------------------------------------- Apple Watch (Funkzentrale) */
+  // In den iPhone-Apps Funkzentrale und Werkstatt gibt es funkNativ.uhr: die App
+  // reicht Stand und Ereignisse an die Apple Watch weiter (Pfeil, Meter, Strasse,
+  // Karte; Vibrationsmuster fuer Abbiegen, Stau, Blitzer ...). Im Browser und als
+  // Home-Symbol fehlt es - dort aendert sich nichts. Gemeldet wird auch bei
+  // ausgeschalteter Ansage: die Uhr ist ja gerade fuer die Fahrt ohne Ton da.
+  //
+  // Wer meldet? Ist die Seite vorne, meldet sie selbst (hier). Schlaeft sie bei
+  // gesperrtem Bildschirm, meldet die App (NaviKern) mit denselben Schwellen. Die
+  // Kennung "<routeId>-ton3" ist in beiden dieselbe, damit es nur einmal vibriert.
+  var uhrDa = !!(window.funkNativ && window.funkNativ.uhr);
+  var uhrAn = true;                       // Einstellung "Apple Watch vibriert"
+  var uhrFahrt = 0;                       // Kennung der Strecke (routeId), 0 = keine
+  var uhrStreckeFertig = false, uhrStreckeVersuch = 0;
+  var uhrAnzeige = null;                  // vom Banner gesetzt: { h, idx, meter, neuName }
+  var uhrLetzter = { t: 0, text: '' };    // letzter Stand: wann, welche Anzeige
+
+  function uhrAktiv() { return uhrDa && uhrAn; }
+  // Nur unterwegs: sonst vibriert es am Schreibtisch, wenn das Ziel gerade gesetzt
+  // ist und der Start nah an der ersten Abbiegung liegt.
+  function uhrFahrend() { return naviModus || tempoKmh >= 12; }
+
+  // Jede neue Strecke bekommt eine neue Kennung; die Uhr holt sich dann die Linie neu
+  function uhrNeueStrecke() {
+    uhrFahrt = Math.max(uhrFahrt + 1, Math.floor(Date.now() / 1000));
+    uhrStreckeFertig = false; uhrStreckeVersuch = 0;
+    uhrAnzeige = null; uhrLetzter = { t: 0, text: '' };
+  }
+
+  // Leere Felder (undefined, null, NaN) weglassen - die Bruecke will nur Echtes
+  function ohneLeer(o) {
+    Object.keys(o).forEach(function (k) {
+      var v = o[k];
+      if (v === undefined || v === null || (typeof v === 'number' && !isFinite(v))) delete o[k];
+    });
+    return o;
+  }
+
+  function uhrEreignis(art, daten) {
+    if (!uhrAktiv() || !uhrFahrend()) return;
+    try { window.funkNativ.uhr.ereignis(art, ohneLeer(daten || {})).catch(function () {}); } catch (e) {}
+  }
+
+  function uhrEnde() {
+    uhrStreckeFertig = false; uhrLetzter = { t: 0, text: '' };
+    if (!uhrDa) return;
+    try { window.funkNativ.uhr.ende().catch(function () {}); } catch (e) {}
+  }
+
+  // Ziel erreicht: die App laesst der Uhr danach noch ein paar Sekunden zum Anzeigen
+  function uhrZiel() {
+    uhrEreignis('ziel', { kennung: uhrFahrt + '-ziel', text: (zielName || '').split(',')[0] || 'Ziel erreicht' });
+    uhrEnde();
+  }
+
+  // "Ausfahrt 12 · Richtung Herrenberg" / "B 27" - kurz, die Uhr hat wenig Platz
+  function uhrStrasse(h, neuName) {
+    var st = h.strasse, teile = [];
+    if (st && st.ausfahrt) teile.push('Ausfahrt ' + st.ausfahrt);
+    if (neuName) teile.push(neuName);
+    else if (st && st.ziele) teile.push('Richtung ' + st.ziele.split(',')[0]);
+    return teile.join(' · ');
+  }
+  function uhrDanach(h) { return h.danach ? (h.danachM < 80 ? 'sofort ' : '') + h.danach : ''; }
+  function uhrDauer() {
+    var v = varianten[variante];
+    return v ? Math.round((v.min + stauAufRoute()) * 60) : null;
+  }
+
+  // Abbiegen: Vorwarnung ("ton") und "jetzt" - gleiche Schwellen wie die Ansage
+  function uhrManoever(art, name, h, meter, neuName) {
+    uhrEreignis(art, {
+      kennung: uhrFahrt + '-' + name, meter: Math.round(meter), text: uhrStrasse(h, neuName),
+      hinweis: ohneLeer({ text: h.text, winkel: typeof h.winkel === 'number' ? Math.round(h.winkel) : null, kreis: !!h.kreis })
+    });
+  }
+
+  // Meter entlang der Strecke von hier bis zum Anfang eines Staukreises;
+  // null, wenn die Strecke nicht hindurchfuehrt
+  function uhrMeterBis(ort, radius, pos) {
+    if (!pos || kumWeg.length !== routePunkte.length) return null;
+    radius = radius || 220;
+    var best = -1, bd = Infinity;
+    for (var i = Math.max(0, pos.idx - 1); i < routePunkte.length; i++) {
+      var d = abstand(routePunkte[i], ort);
+      if (d < bd) { bd = d; best = i; }
+    }
+    if (best < 0 || bd > radius) return null;
+    return Math.max(0, Math.round(kumWeg[best] - pos.s - radius));
+  }
+
+  // Der naechste Stau auf dem Weg vor uns (fuer die Kapsel auf der Uhr)
+  function uhrStauVoraus(pos) {
+    var beste = null;
+    sperren.forEach(function (sp) {
+      if (!istAuto(sp)) return;
+      var min = Math.round(Math.max(sp.minuten || 0, sp.gesamt || 0));
+      if (min < 1) return;
+      var m = uhrMeterBis(sp.ort, sp.radius, pos);
+      if (m === null || m > 30000) return;
+      if (!beste || m < beste.meter) beste = { meter: m, text: 'Stau ' + min + ' min' };
+    });
+    return beste;
+  }
+
+  // Neuer Stau voraus (aus verkehrPruefen)
+  function uhrStauMelden(neu) {
+    var min = Math.round(neu.reduce(function (a, st) { return a + st.minuten; }, 0));
+    var pos = standort ? lotAufStrecke(standort) : null;
+    uhrEreignis('stau', {
+      kennung: uhrFahrt + '-stau' + Math.round(neu[0].ort[0] * 1000),
+      text: (neu.length === 1 ? 'Stau' : neu.length + ' Störungen') + ' voraus, ' + min + ' min',
+      meter: pos ? uhrMeterBis(neu[0].ort, neu[0].radius, pos) : null
+    });
+  }
+
+  // Die Strecke fuer die Karte auf der Uhr: hoechstens ~1500 Punkte (die App
+  // vereinfacht sie weiter), und nur EINMAL je Strecke.
+  function uhrStrecke() {
+    var n = routePunkte.length, schritt = Math.max(1, Math.ceil(n / 1500)), aus = [];
+    function rund(p) { return [Math.round(p[0] * 1e5) / 1e5, Math.round(p[1] * 1e5) / 1e5]; }
+    for (var i = 0; i < n; i += schritt) aus.push(rund(routePunkte[i]));
+    if ((n - 1) % schritt) aus.push(rund(routePunkte[n - 1]));
+    return aus;
+  }
+
+  // Stand der Fahrt an die Uhr: naechstes Manoever, Restweg, Stau, Position.
+  // Geht raus, sobald sich fuer die Uhr etwas aendert (hoechstens alle 2 s), sonst
+  // alle 6 s - die Uhr zeigt "Keine Meldung vom iPhone", wenn 15 s nichts kommt.
+  function uhrStandSenden(ll) {
+    if (!uhrAktiv() || !uhrFahrend() || !ziel || !routePunkte.length || document.hidden || gesagt.ziel) return;
+    var jetzt = Date.now();
+    var pos = lotAufStrecke(ll), aufStrecke = !!pos && pos.d < 150;
+    var gesamt = kumWeg.length ? kumWeg[kumWeg.length - 1] : 0;
+    var rest = aufStrecke ? Math.max(0, gesamt - pos.s) : abstand(ll, ziel);
+    var a = uhrAnzeige, h = a && a.h ? a.h : null;
+    var meter = h ? Math.max(0, a.meter) : null;
+    var stau = aufStrecke ? uhrStauVoraus(pos) : null;
+    var schluessel = [uhrFahrt, h ? a.idx : -1,
+                      meter === null ? 0 : Math.round(meter / (meter > 400 ? 50 : 10)),
+                      Math.round(rest / 100), stau ? stau.text : ''].join('|');
+    var geaendert = schluessel !== uhrLetzter.text;
+    if (jetzt - uhrLetzter.t < (geaendert ? 2000 : 6000)) return;
+    uhrLetzter = { t: jetzt, text: schluessel };
+
+    var s = ohneLeer({
+      quelle: 'Staufunk', modus: modus === 'rad' ? 'rad' : 'auto', routeId: uhrFahrt,
+      tempo: Math.round(tempoKmh), kurs: kurs === null ? null : Math.round(kurs)
+    });
+    s.pos = [ll[0], ll[1]];
+    if (h) {
+      s.hinweis = ohneLeer({
+        text: h.text, kreis: !!h.kreis, meter: Math.round(meter),
+        winkel: typeof h.winkel === 'number' ? Math.round(h.winkel) : null,
+        strasse: uhrStrasse(h, a.neuName), danach: uhrDanach(h)
+      });
+    }
+    var v = varianten[variante], restSek = null;
+    if (aufStrecke && v && gesamt > 0) {
+      restSek = Math.round((v.min * rest / gesamt + stauAufRoute(Math.max(0, pos.idx - 1))) * 60);
+    }
+    s.rest = ohneLeer({ meter: Math.round(rest), sekunden: restSek });
+    if (stau) s.stau = ohneLeer({ text: stau.text, meter: stau.meter });
+    if (!uhrStreckeFertig && jetzt - uhrStreckeVersuch > 5000) {
+      s.route = uhrStrecke();
+      uhrStreckeVersuch = jetzt;
+    }
+    var fahrt = uhrFahrt, mitRoute = !!s.route;
+    window.funkNativ.uhr.stand(s).then(function () {
+      if (mitRoute && fahrt === uhrFahrt) uhrStreckeFertig = true;
+    }, function () {});
   }
 
   // Banner-Hoehe als CSS-Variable: die Fahnen darunter rutschen genau so
@@ -2887,6 +3086,7 @@
         letzteNeu = Date.now(); abseitsZaehler = 0;
         info('Abseits der Route – berechne neu …');
         if (sprache) { letzterText = ''; sagen('Route wird neu berechnet'); }
+        uhrEreignis('neuBerechnet', { kennung: uhrFahrt + '-neu' + Math.floor(Date.now() / 1000), text: 'Route wird neu berechnet' });
         route();
       }
     } else abseitsZaehler = 0;
@@ -3537,7 +3737,8 @@
 
     // Unten unter Mehr: welche Fassung läuft (und welcher Bau der Werkstatt-App)
     $('s-stand').textContent = 'Staufunk ' + STAND +
-      (window.funkNativ && window.funkNativ.stand ? ' · Werkstatt-App ' + window.funkNativ.stand : '');
+      (window.funkNativ && window.funkNativ.stand ? ' · Werkstatt-App ' + window.funkNativ.stand : '') +
+      (uhrDa ? ' · Uhr-Brücke' : '');
 
     // Hintergrund-Protokoll der App "Werkstatt" (NaviProtokoll.swift):
     // zeigen und gleich kopieren, damit man es weitergeben kann
@@ -3604,6 +3805,15 @@
       merken('blitzer', blitzWarnen ? '1' : '0');
       blitzerZeichnen();
       if (!blitzWarnen) $('blitzfahne').hidden = true;
+      naviMelden();
+    };
+
+    $('s-uhr').onclick = function () {
+      uhrAn = !uhrAn;
+      $('s-uhr').textContent = uhrAn ? 'an' : 'aus';
+      schalter('s-uhr', uhrAn);
+      merken('uhr', uhrAn ? '1' : '0');
+      if (!uhrAn) uhrEnde();
       naviMelden();
     };
 
@@ -3763,6 +3973,7 @@
     schotterOk   = geholt('schotter', '0') === '1';
     sprache     = geholt('sprache', '0') === '1';
     musikWeiter = geholt('musik', '1') === '1';
+    uhrAn       = geholt('uhr', '1') === '1';
     // Vor jeder moeglichen Ausgabe - die erste Ansage darf Spotify schon
     // nicht anhalten
     tonSitzung();
@@ -3793,6 +4004,9 @@
     schalter('s-nacht', nacht);   $('s-nacht').textContent   = nacht ? 'an' : 'aus';
     schalter('s-blitzer', blitzWarnen); $('s-blitzer').textContent = blitzWarnen ? 'an' : 'aus';
     schalter('s-musik', musikWeiter);   $('s-musik').textContent = musikWeiter ? 'an' : 'aus';
+    // Nur in der iPhone-App mit Uhr-Bruecke (Funkzentrale, Werkstatt) gibt es den Schalter
+    $('s-uhr-reihe').hidden = !uhrDa; $('s-uhr-hinweis').hidden = !uhrDa;
+    schalter('s-uhr', uhrAn);           $('s-uhr').textContent = uhrAn ? 'an' : 'aus';
     // Aeltere iPhones (vor iOS 16.4) kennen die Audio Session API nicht -
     // dort wirkt der Schalter nicht, und das soll man auch sehen
     if (!navigator.audioSession) $('s-musik-hinweis').textContent =

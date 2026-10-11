@@ -73,6 +73,24 @@ beim ersten Start selbst zu BRouter hoch und merkt sich die Kennung.
 
 ## Änderungen
 
+**v50 (11.10.2026)** — Apple Watch: Staufunk meldet der Funkzentrale beim Fahren,
+was die Uhr zeigen und vibrieren soll (`funkNativ.uhr`, nur in der Funkzentrale und der
+Werkstatt-App; im Browser und als Home-Symbol ändert sich nichts).
+- **Was geht raus** (Abschnitt „Apple Watch“ in `app.js`): Stand (nächstes Manöver mit Meter,
+  Straße, „danach“, Restweg und Ankunft, Stau voraus, Position, vereinfachte Strecke nur einmal
+  je Strecke) und Ereignisse (Vorwarnung und Jetzt beim Abbiegen, Stau voraus, Umfahrung,
+  Route neu berechnet, Blitzer, Tempolimit, Ziel). Es wird auch bei ausgeschalteter Ansage
+  gemeldet – die Uhr ist ja für die Fahrt ohne Ton da. Erst unterwegs (Navi-Modus oder ab 12 km/h).
+- **Wer meldet:** ist die Seite vorne, meldet sie selbst; schläft sie bei gesperrtem Bildschirm,
+  meldet das Hintergrund-Navi der App (`NaviKern`) mit denselben Schwellen und denselben
+  Kennungen (`<routeId>-ton3`), damit es nur einmal vibriert. Die Schwellen stehen an zwei
+  Stellen (Seite und `NaviKern`) und müssen zusammen geändert werden. Das Hintergrund-Navi
+  kennt Stau und Umfahrung nicht – die kommen nur von der Seite.
+- **Einstellung:** unter Mehr „Apple Watch vibriert“ (nur mit Brücke sichtbar, gemerkt als `uhr`).
+- **Prüfstand:** `?pruefstand&app` täuscht `funkNativ` vor und schreibt die Meldungen in
+  `window.pruefApp.uhr` (`stand`, `ereignis`, `ende`).
+- Version: `STAND` v50, `sw.js` `un-v50`, `?v=50`; unter Mehr steht „· Uhr-Brücke“ dahinter.
+
 **v37 (07.10.2026)** — Versionsanzeige: ganz unten unter Mehr steht „Staufunk v37“
 (`STAND` in app.js), in der Werkstatt-App zusätzlich deren Bau-Stand (`funkNativ.stand`).
 Bei jeder neuen Fassung `STAND`, alle `?v=` und `VERSION` in sw.js gemeinsam hochzählen.

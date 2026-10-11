@@ -275,6 +275,7 @@ html, body {
 #sheet h2 { margin: 0; font-size: 17px; font-weight: 650; }
 
 #sheet .reihe { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+#sheet .reihe[hidden], #sheet .hinweis[hidden] { display: none; }
 #sheet .reihe span { font-size: 14.5px; }
 #sheet .reihe button { min-width: 62px; }
 
