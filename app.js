@@ -21,7 +21,7 @@
 
   /* ------------------------------------------------------------ Grundwerte */
   // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
-  var STAND = 'v50';
+  var STAND = 'v51';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -1366,14 +1366,21 @@
     f.textContent = '📷 ' + (naechster.mobil ? 'Mobiler Blitzer' : 'Blitzer') +
                     ' in ' + Math.round(nd / 10) * 10 + ' m' +
                     (naechster.tempo ? ' · Tempo ' + naechster.tempo : '');
-    var schluessel = 'blitz' + naechster.ort[0].toFixed(5);
-    if (nd < sicht * 0.75 && !blitzGesagt(schluessel)) {
-      // Eintraege an derselben Stelle (je Fahrtrichtung einer, doppelt
-      // gemeldet) gelten mit als gewarnt - 80 m wie beim Entdoppeln
-      var jetzt = Date.now();
-      blitzer.forEach(function (b) {
-        if (abstand(b.ort, naechster.ort) < 80) gesagt['blitz' + b.ort[0].toFixed(5)] = jetzt;
-      });
+    // Zwei Ansagen wie beim Abbiegen: eine mit Vorlauf, dann kurz davor noch
+    // einmal. Bis v50 gab es nur die erste (bei 0,75 x Sichtweite, bei
+    // 100 km/h also schon 520 m vorher) - danach Funkstille, und am Kasten
+    // selbst wusste man nicht mehr, ob er noch kommt. Die Schwellen sind
+    // genau die der Abbiege-Ansagen (ansagePruefen), damit sich das Navi
+    // ueberall gleich anfuehlt: 250 m in der Stadt, nach Tempo gestreckt.
+    var vor = Math.max(250, tempoKmh * 4.5);     // ~16 s Vorlauf
+    var nah = Math.max(60, tempoKmh * 1.2);      // ~4 s, direkt davor
+    var kVor = 'blitz' + naechster.ort[0].toFixed(5);
+    var kNah = 'blitznah' + naechster.ort[0].toFixed(5);
+    if (nd < vor && !blitzGesagt(kVor)) {
+      blitzMarkieren(naechster, 'blitz');
+      // Kam der Blitzer erst spaet in die Liste (Nachladen, GPS wieder da),
+      // ist die Vorwarnung zugleich die Nahwarnung - nicht zweimal reden.
+      if (nd < nah * 2) blitzMarkieren(naechster, 'blitznah');
       // Gleicher Wortlaut wie beim vorigen Blitzer ("Achtung, Blitzer. Tempo
       // 50") ist trotzdem eine neue Warnung - die Wiederholsperre in sagen()
       // schluckte sie bisher
@@ -1383,10 +1390,31 @@
       // Die Uhr warnt auch ohne Ansage. Gleiche Kennung wie in der App (NaviKern):
       // warnen beide, vibriert es trotzdem nur einmal.
       uhrEreignis('blitzer', {
-        kennung: uhrFahrt + '-' + schluessel, meter: Math.round(nd),
+        kennung: uhrFahrt + '-' + kVor, meter: Math.round(nd),
         text: (naechster.mobil ? 'Mobiler Blitzer' : 'Blitzer') + (naechster.tempo ? ' · Tempo ' + naechster.tempo : '')
       });
+    } else if (!naechster.mobil && nd < nah && !blitzGesagt(kNah)) {
+      // Nur feste Kaesten: ihr Standort kommt aus OSM und stimmt auf wenige
+      // Meter. Bei gemeldeten mobilen Blitzern waere "in 50 Metern" eine
+      // Genauigkeit, die die Meldung nicht hat.
+      blitzMarkieren(naechster, 'blitznah');
+      letzterText = '';
+      sagen('Fester Blitzer in ' + sprechWeg(nd));
+      uhrEreignis('blitzer', {
+        kennung: uhrFahrt + '-' + kNah, meter: Math.round(nd),
+        text: 'Fester Blitzer in ' + wegText(nd)
+      });
     }
+  }
+
+  // Eintraege an derselben Stelle (je Fahrtrichtung einer, doppelt gemeldet)
+  // gelten mit als gewarnt - 80 m wie beim Entdoppeln. `blitzVergessen`
+  // raeumt beide Praefixe auf, es filtert auf 'blitz' am Anfang.
+  function blitzMarkieren(b, praefix) {
+    var jetzt = Date.now();
+    blitzer.forEach(function (x) {
+      if (abstand(x.ort, b.ort) < 80) gesagt[praefix + x.ort[0].toFixed(5)] = jetzt;
+    });
   }
 
   /* ------------------------------------------------------------------ Profil */
@@ -4066,6 +4094,12 @@
         if (ziel) route();
       },
       vergleich: function () { return vergleichsweg; },
+      // Einen Blitzer unterschieben, ohne Overpass/atudo zu fragen. mobil=true
+      // heisst "gemeldet" - dann faellt die Nahwarnung weg.
+      blitzSetzen: function (lat, lon, tempo, mobil) {
+        blitzer = [{ ort: [lat, lon], tempo: tempo || null, mobil: !!mobil, richtung: [] }];
+        blitzerZeichnen();
+      },
       zustand: function () { return { fahrmodus: fahrmodus, folgen: folgen,
         zielDa: !!ziel, kurs: kurs, tempo: Math.round(tempoKmh),
         varianten: varianten.length, limit: limitAktuell,

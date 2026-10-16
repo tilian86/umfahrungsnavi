@@ -4,7 +4,7 @@
  * werden, sonst mischt GitHub Pages alte und neue Staende. Sie gehoert
  * zusammen mit den ?v=-Marken in index.html angefasst.
  */
-var VERSION = 'un-v50';
+var VERSION = 'un-v51';
 // Die ?v=-Marke im Geruest MUSS die aus index.html sein - sonst liegt im
 // Cache nur eine Fassung unter falschem Namen, und ohne Netz fehlt direkt
 // nach einem Update das Skript (weisse Seite). Deshalb aus VERSION abgeleitet.
