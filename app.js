@@ -21,7 +21,7 @@
 
   /* ------------------------------------------------------------ Grundwerte */
   // Mit ?v= in index.html und VERSION in sw.js zusammen hochzählen; steht unter Mehr.
-  var STAND = 'v51';
+  var STAND = 'v52';
   var BROUTER = 'https://brouter.de/brouter';
   var PROFIL_DATEI = 'profil/umfahrung.brf';
   var ERSATZPROFIL = 'car-fast';        // falls der Upload scheitert
@@ -108,6 +108,9 @@
   var variantenWunsch = null;
   var hinweise = [], gesagt = {}, letzterText = '';
   var routePunkte = [], routeRefs = [], blitzer = [];
+  // Baustellen und Hindernisse entlang der Route: NUR zum Ansagen. Eigener
+  // Kanal, nie in `sperren` - dort wird jeder Eintrag zum Nogo.
+  var hindernisse = [], hindMarken = [], hindGesagt = {};
   var sperren = [];                      // {ort,radius,gewicht,hart,text,quelle,kreis}
   var folgen = true, sprache = false, nacht = false;
   var musikWeiter = true;                // Ansage ueber die Musik, siehe tonSitzung()
@@ -774,6 +777,7 @@
     // eingegebenes Ziel schwieg er also komplett. Genau das war gemeldet.
     sicher(blitzerPflegen, ll);
     sicher(blitzPruefen, ll);
+    sicher(hindernisPruefen, ll);         // Liste gibt es nur mit Route (verkehrPruefen)
     // Ohne Route gingen die eben gewarnten Blitzer bisher nicht an die App -
     // nach dem Sperren des Bildschirms warnte sie dann denselben noch einmal
     if (!(ziel && routePunkte.length)) sicher(naviGesagtMelden);
@@ -952,6 +956,7 @@
       text: s.text || 'Stau',
       quelle: s.quelle || 'hand',
       ref: s.ref || null,                 // Autobahn, fuers Nachmessen
+      art: s.art || null,                 // 'sperrung': Nachtsperrung mit Zeitfenster
       bestaetigt: Date.now()              // zuletzt als Stau gemessen
     };
     sp.gewicht = gewichtAus(sp);
@@ -1140,6 +1145,8 @@
       .then(function (stoerungen) {
         var jetzt = Date.now();
         verkehrLuecke = (stoerungen.ausfall || []).join(', ');
+        hindernisse = stoerungen.hinweise || [];
+        hindernisseZeichnen();
 
         // 1. Gemeldetes mit den Sperren abgleichen: derselbe Stau bestaetigt
         //    seine Sperre, ein neuer bekommt eine. 500 m Spielraum, weil die
@@ -1209,7 +1216,7 @@
           var min = Math.round(neu.reduce(function (a, s) { return a + s.minuten; }, 0));
           letzterText = '';
           sagen(neu.length === 1
-            ? 'Stau voraus, ' + min + ' Minuten. Ich suche eine Umfahrung.'
+            ? (min ? 'Stau voraus, ' + min + ' Minuten.' : 'Sperrung voraus.') + ' Ich suche eine Umfahrung.'
             : neu.length + ' Störungen voraus, zusammen ' + min +
               ' Minuten. Ich suche eine Umfahrung.');
         }
@@ -1407,6 +1414,51 @@
     }
   }
 
+  /* ------------------------------------------------- Baustellen, Hindernisse */
+  function hindernisseZeichnen() {
+    hindMarken.forEach(function (mk) { mk.remove(); });
+    hindMarken = [];
+    if (modus === 'rad') return;
+    hindernisse.forEach(function (h) {
+      var el = document.createElement('div');
+      el.className = 'hind-punkt';
+      el.textContent = h.art === 'baustelle' ? '🚧' : '⚠';
+      el.title = h.text || '';
+      hindMarken.push(new maplibregl.Marker({ element: el, rotationAlignment: 'viewport' })
+        .setLngLat(m(h.ort)).addTo(karte));
+    });
+  }
+
+  // Einmal je Stelle ansagen, mit dem Vorlauf der Abbiege- und Blitzer-
+  // Ansagen. Die Marke haelt eine halbe Stunde: eine Baustelle steht
+  // wochenlang, auf der Hausstrecke soll sie trotzdem jeden Tag einmal kommen.
+  var HIND_VERGESSEN = 1800000;
+  function hindernisPruefen(ll) {
+    if (modus === 'rad' || !hindernisse.length) return;
+    if (naviNativ && document.hidden) return;   // hinten spricht die App - nichts verbrauchen
+    var jetzt = Date.now(), vor = Math.max(250, tempoKmh * 4.5);
+    var naechstes = null, nd = Infinity;
+    hindernisse.forEach(function (h) {
+      var d = abstand(ll, h.ort);
+      if (d > vor || d >= nd) return;
+      if (jetzt - (hindGesagt[h.ort.join()] || 0) < HIND_VERGESSEN) return;
+      if (kurs !== null) {
+        if (window.Verkehr.winkelDiff(window.Verkehr.peilung(ll, h.ort), kurs) > 65) return;
+        // Fahrtrichtung der Strecke an der Stelle - sonst Gegenfahrbahn
+        if (h.kurs != null && window.Verkehr.winkelDiff(h.kurs, kurs) > 60) return;
+      }
+      naechstes = h; nd = d;
+    });
+    if (!naechstes) return;
+    // Eine Baustelle steht oft mehrfach in der Liste (je Abschnitt, Landes-
+    // und Autobahnmeldung) - alles in der Naehe gilt mit als gesagt
+    hindernisse.forEach(function (x) {
+      if (abstand(x.ort, naechstes.ort) < 300) hindGesagt[x.ort.join()] = jetzt;
+    });
+    letzterText = '';
+    sagen(naechstes.art === 'baustelle' ? 'Baustelle voraus' : 'Achtung, Hindernis');
+  }
+
   // Eintraege an derselben Stelle (je Fahrtrichtung einer, doppelt gemeldet)
   // gelten mit als gewarnt - 80 m wie beim Entdoppeln. `blitzVergessen`
   // raeumt beide Praefixe auf, es filtert auf 'blitz' am Anfang.
@@ -1502,6 +1554,7 @@
   function zielLoeschen() {
     ziel = null; zielName = ''; varianten = []; hinweise = [];
     routePunkte = []; routeRefs = []; blitzer = []; blitzBisS = 0;
+    hindernisse = []; hindernisseZeichnen();
     fahrtMerken();
     uhrEnde(); uhrFahrt = 0;
     naviMelden();
@@ -3287,9 +3340,14 @@
 
   function sucheAktivieren() {
     var feld = $('suche'), liste = $('vorschlaege');
+    // Jede Eingabe zaehlt hoch. Eine Antwort, die zu einer aelteren Eingabe
+    // gehoert (langsamer Funk, "Glob" kommt nach "Globus"), wird verworfen -
+    // sonst ueberschrieb sie die Vorschlaege zum neuesten Text.
+    var suchNr = 0;
 
     feld.addEventListener('input', function () {
       clearTimeout(vorschlagTimer);
+      var nr = ++suchNr;
       $('suche-loeschen').hidden = !feld.value;
       hausnrSchliessen();
       var text = feld.value.trim();
@@ -3337,7 +3395,7 @@
                          lat: parseFloat(o.lat), lon: parseFloat(o.lon) };
               }));
             })
-            .catch(function () { liste.hidden = true; });
+            .catch(function () { if (nr === suchNr) liste.hidden = true; });
         });
 
         // Nahe Treffer zuerst (nach Entfernung), ferne danach in Photons
@@ -3362,6 +3420,7 @@
         }
 
         function zeigen(treffer) {
+          if (nr !== suchNr) return;           // veraltete Antwort
           liste.innerHTML = '';
           if (!treffer.length) { liste.hidden = true; return; }
           treffer.forEach(function (o) {
@@ -3859,7 +3918,7 @@
     schalter('s-feldwege', feldwegeFrei); $('s-feldwege').textContent = feldwegeFrei ? 'an' : 'aus';
     schalter('s-schotter', schotterOk);   $('s-schotter').textContent = schotterOk ? 'an' : 'aus';
       merken('modus', modus);
-      if (modus === 'rad') { sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic'); }
+      if (modus === 'rad') { sperrenLeeren('autobahn'); sperrenLeeren('tomtom'); sperrenLeeren('tic'); hindernisse = []; hindernisseZeichnen(); }
       blitzerZeichnen();
       radwegeAnzeigen();
       variantenWunsch = null;      // Marken heissen im Auto- und Radmodus anders
@@ -4080,6 +4139,12 @@
       standort: function () { return standort; },
       sperren: function () { return sperren; },
       blitzer: function () { return blitzer; },
+      hindernisse: function () { return hindernisse; },
+      // Baustelle/Hindernis unterschieben (wie blitzSetzen)
+      hindernisSetzen: function (lat, lon, art, kurs) {
+        hindernisse = [{ ort: [lat, lon], art: art || 'baustelle', kurs: kurs == null ? null : kurs, text: 'Prüfstand' }];
+        hindernisseZeichnen();
+      },
       refs: function () { return routeRefs; },
       varianten: function () { return varianten; },
       verkehrPruefen: verkehrPruefen,

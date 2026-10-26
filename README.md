@@ -8,6 +8,8 @@ umfahren — auch durch Wohngebiete.
 **Live:** https://tilian86.github.io/umfahrungsnavi/
 **Prüfstand:** `?pruefstand` an die Adresse hängen — täuscht GPS vor und fährt
 die Route ab. Ohne den lässt sich am Schreibtisch nichts testen.
+**Prüfung:** `pruefung.html` fährt Blitzer, Baustellen, Sperrungen und Suche
+automatisch ab (stumm, ohne Netz, auch headless; Ergebnis in `window.pruefErgebnis`).
 
 Auf dem iPhone über Safari → Teilen → „Zum Home-Bildschirm" ablegen. Dann
 startet die App echt im Vollbild, ohne Adressleiste.
@@ -156,6 +158,7 @@ Bei jeder neuen Fassung `STAND`, alle `?v=` und `VERSION` in sw.js gemeinsam hoc
 | `app.js` | Oberfläche, Routing, Abbiegeführung |
 | `verkehr.js` | Verkehrsdaten, Blitzer, Straßenkennungen |
 | `pruefstand.js` | GPS-Attrappe, nur bei `?pruefstand` aktiv |
+| `pruefung.html` | automatische Testfahrten auf dem Prüfstand |
 | `profil/umfahrung.brf` | eigenes BRouter-Auto-Profil |
 | `sw.js` | Service Worker — **Version bei jeder Änderung hochzählen** |
 | `STRATEGIE.md` | Warum es so gebaut ist, mit Messprotokoll |
