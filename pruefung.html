@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Staufunk – Prüfung</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; padding: 12px 16px; background: #14161a; color: #e8e8e8;
+           font: 14px/1.45 -apple-system, system-ui, sans-serif; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    #stand { font-weight: 650; margin-bottom: 10px; }
+    #stand.gruen { color: #5fd47a; } #stand.rot { color: #ff6b5b; }
+    ol { padding-left: 20px; margin: 0; }
+    li { margin: 4px 0; }
+    li.ok::marker { color: #5fd47a; } li.falsch { color: #ff6b5b; }
+    li small { display: block; opacity: .7; white-space: pre-wrap; }
+    iframe { width: 390px; max-width: 100%; height: 520px; border: 1px solid #333;
+             border-radius: 10px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+<h1>Staufunk – automatische Prüfung</h1>
+<div id="stand">läuft …</div>
+<ol id="liste"></ol>
+<iframe id="app" title="Staufunk im Prüfstand"></iframe>
+
+<script>
+/* Automatische Testfahrten. Laedt die App mit ?pruefstand in einen Rahmen,
+ * schiebt das vorgetaeuschte GPS auf Blitzer und Baustellen zu und prueft,
+ * was die App sagt. Dazu nachgestellte Antworten fuer Autobahn-Dienst,
+ * Landesmeldungen und Photon - die Pruefung braucht kein Netz.
+ *
+ * Headless: das Ergebnis steht in window.pruefErgebnis
+ * ({ fertig, ok, gesamt, fehler: [...] }).
+ *
+ * Fallen (aus Erfahrung):
+ * - Die App bindet ihre Knoepfe erst nach dem Laden - auf window._navi warten.
+ * - Ohne &app spricht die Seite selbst; speechSynthesis wird stumm ersetzt
+ *   und mitgeschrieben. Mit &app gaelte ein verdeckter Browser als
+ *   "Bildschirm gesperrt", und sagen() schwiege.
+ * - Blitzer-Abfragen stilllegen, sonst ueberschreibt blitzerUmher die
+ *   untergeschobene Liste.
+ * - Je Fahrt eine frische Breite: die gesagt-Marken halten 10 Minuten
+ *   (Baustellen 30), am selben Ort kaeme keine zweite Ansage.
+ */
+(function () {
+  'use strict';
+  var rahmen = document.getElementById('app'), w = null, gesprochen = [];
+  var gesamt = 0, fehler = [];
+  window.pruefErgebnis = { fertig: false, ok: 0, gesamt: 0, fehler: fehler };
+
+  function warte(ms) { return new Promise(function (ok) { setTimeout(ok, ms); }); }
+  function eintrag(text, gut, mehr) {
+    var li = document.createElement('li');
+    li.className = gut ? 'ok' : 'falsch';
+    li.textContent = (gut ? '✓ ' : '✗ ') + text;
+    if (mehr) { var s = document.createElement('small'); s.textContent = mehr; li.appendChild(s); }
+    document.getElementById('liste').appendChild(li);
+  }
+  function pruefe(text, gut, mehr) {
+    gesamt++;
+    if (!gut) fehler.push(text + (mehr ? ' – ' + mehr : ''));
+    eintrag(text, gut, gut ? '' : mehr);
+  }
+  function gleich(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+
+  // Einstellungen, die die Pruefung braucht. Der Rahmen teilt sich den
+  // Speicher mit der echten App - deshalb hinterher zuruecksetzen.
+  var GEMERKT = ['un-sprache', 'un-blitzer', 'un-modus'], vorher = {};
+  GEMERKT.forEach(function (k) { try { vorher[k] = localStorage.getItem(k); } catch (e) {} });
+  function zuruecksetzen() {
+    GEMERKT.forEach(function (k) {
+      try { if (vorher[k] === null) localStorage.removeItem(k); else localStorage.setItem(k, vorher[k]); }
+      catch (e) {}
+    });
+  }
+  try {
+    localStorage.setItem('un-sprache', '1');
+    localStorage.setItem('un-blitzer', '1');
+    localStorage.setItem('un-modus', 'auto');
+  } catch (e) {}
+
+  /* ------------------------------------------- Nachgestellte Antworten */
+  var attrappen = [];   // { muster, antwort: function (url) -> {inhalt, ms, text} }
+  function attrappe(muster, antwort) { attrappen.push({ muster: muster, antwort: antwort }); }
+  function fetchErsetzen() {
+    var echt = w.fetch.bind(w);
+    w.fetch = function (url, opt) {
+      var u = String(url && url.url || url);
+      for (var i = 0; i < attrappen.length; i++) {
+        if (!attrappen[i].muster.test(u)) continue;
+        var a = attrappen[i].antwort(u);
+        var koerper = typeof a.inhalt === 'string' ? a.inhalt : JSON.stringify(a.inhalt);
+        return warte(a.ms || 0).then(function () {
+          return new w.Response(koerper, { status: 200 });
+        });
+      }
+      return echt(url, opt);
+    };
+  }
+
+  /* ---------------------------------------------------------- Geometrie */
+  // Ort `meter` noerdlich/suedlich von [lat, lon] (Kurs 0 = Norden)
+  function nord(p, meter) { return [p[0] + meter / 111195, p[1]]; }
+  function ost(p, meter) { return [p[0], p[1] + meter / (111195 * Math.cos(p[0] * Math.PI / 180))]; }
+  function zwei(n) { return (n < 10 ? '0' : '') + n; }
+  function datum(ms) {
+    var d = new Date(ms);
+    return zwei(d.getDate()) + '.' + zwei(d.getMonth() + 1) + '.' + String(d.getFullYear()).slice(2) +
+           ' ' + zwei(d.getHours()) + ':' + zwei(d.getMinutes());
+  }
+  function fenster(von, bis) {
+    return [datum(von) + ' bis zum ' + datum(bis) + ' Uhr'];
+  }
+
+  // Faehrt nach Norden auf `ziel` zu, in 40-m-Schritten ab `ab` Metern.
+  // Langsamer geht es nicht: die App verwirft Spruenge ueber 250 km/h
+  // (positionTaugt) - 40 m je 0,7 s sind gut 200 km/h. Schreibt mit, was bei
+  // welchem Abstand gesagt wurde. unterwegs(d, k) laeuft vor jedem Schritt.
+  var SCHRITT = 40, TAKT = 700;
+  function fahrt(ziel, ab, unterwegs) {
+    var protokoll = [], abstaende = [];
+    for (var d = ab; d >= 0; d -= SCHRITT) abstaende.push(d);
+    var p0 = nord(ziel, -ab);
+    // Der Sprung an die neue Stelle gilt erst als echt, wenn er sich
+    // dreimal bestaetigt - deshalb ein paarmal dort "stehen"
+    var kette = [0, 1, 2, 3].reduce(function (k) {
+      return k.then(function () { w.pruefSetzen(p0[0], p0[1], 0); return warte(250); });
+    }, Promise.resolve()).then(function () { gesprochen.length = 0; });
+    abstaende.forEach(function (d, k) {
+      kette = kette.then(function () {
+        var p = nord(ziel, -d);
+        if (unterwegs) unterwegs(d, k);
+        w.pruefSetzen(p[0], p[1], 0);
+        return warte(TAKT);
+      }).then(function () {
+        while (gesprochen.length) protokoll.push({ bei: d, text: gesprochen.shift() });
+      });
+    });
+    return kette.then(function () { return protokoll; });
+  }
+  function texte(prot) { return prot.map(function (x) { return x.text; }); }
+  function zeigeProt(prot) { return prot.map(function (x) { return x.bei + ' m: ' + x.text; }).join('\n') || '(nichts gesagt)'; }
+
+  // Jede Fahrt an einer eigenen Stelle (frische Breite, siehe oben)
+  var naechsteStelle = 0;
+  function stelle() { naechsteStelle++; return [48.40 + naechsteStelle * 0.02, 9.30]; }
+
+  /* ---------------------------------------------------------- Pruefungen */
+  var DAVOR = 600;
+
+  function blitzerFest() {
+    var b = stelle();
+    w._navi.blitzSetzen(b[0], b[1], 50, false);
+    return fahrt(b, DAVOR).then(function (prot) {
+      pruefe('Fester Blitzer: zwei Ansagen, Vorwarnung bei ~240 m', prot.length === 2 &&
+             prot[0].bei === 240 && prot[0].text === 'Achtung, Blitzer. Tempo 50' &&
+             prot[1].bei === 40 && prot[1].text === 'Fester Blitzer in 40 Metern',
+             zeigeProt(prot));
+    });
+  }
+  function blitzerMobil() {
+    var b = stelle();
+    w._navi.blitzSetzen(b[0], b[1], 50, true);
+    return fahrt(b, DAVOR).then(function (prot) {
+      pruefe('Mobiler Blitzer: genau eine Ansage', gleich(texte(prot), ['Achtung, mobiler Blitzer. Tempo 50']),
+             zeigeProt(prot));
+    });
+  }
+  function blitzerSpaet() {
+    var b = stelle();
+    w._navi.blitzSetzen(b[0] + 1, b[1], 50, false);        // weit weg - noch keiner in Sicht
+    return fahrt(b, 120, function (d, k) {
+      if (k === 0) w._navi.blitzSetzen(b[0], b[1], 50, false);   // erst jetzt entdeckt
+    }).then(function (prot) {
+      pruefe('Spät entdeckter Blitzer: nur eine Ansage', gleich(texte(prot), ['Achtung, Blitzer. Tempo 50']),
+             zeigeProt(prot));
+    });
+  }
+  function blitzerGegenrichtung() {
+    var b = stelle();
+    // Blitzer hinter uns: wir fahren nach Norden, er steht suedlich
+    w._navi.blitzSetzen(b[0], b[1], 50, false);
+    return fahrt(nord(b, 700), DAVOR).then(function (prot) {
+      pruefe('Blitzer hinter uns: keine Ansage', prot.length === 0, zeigeProt(prot));
+    });
+  }
+
+  function baustelle() {
+    var h = stelle();
+    var sperrenVorher = w._navi.sperren().length;
+    w._navi.hindernisSetzen(h[0], h[1], 'baustelle', 0);
+    return fahrt(h, DAVOR).then(function (prot) {
+      pruefe('Baustelle: einmal „Baustelle voraus“ bei ~240 m',
+             gleich(texte(prot), ['Baustelle voraus']) && prot[0].bei === 240, zeigeProt(prot));
+      pruefe('Baustelle landet nicht in den Sperren', w._navi.sperren().length === sperrenVorher,
+             'Sperren: ' + w._navi.sperren().length);
+      // Zweite Fahrt an dieselbe Stelle: schon gesagt
+      return fahrt(h, DAVOR);
+    }).then(function (prot) {
+      pruefe('Baustelle: an derselben Stelle nicht noch einmal', prot.length === 0, zeigeProt(prot));
+    });
+  }
+  function hindernis() {
+    var h = stelle();
+    w._navi.hindernisSetzen(h[0], h[1], 'hindernis', null);
+    return fahrt(h, DAVOR).then(function (prot) {
+      pruefe('Hindernis: einmal „Achtung, Hindernis“', gleich(texte(prot), ['Achtung, Hindernis']), zeigeProt(prot));
+    });
+  }
+  function baustelleGegenfahrbahn() {
+    var h = stelle();
+    w._navi.hindernisSetzen(h[0], h[1], 'baustelle', 180);   // Strecke dort Richtung Sueden
+    return fahrt(h, DAVOR).then(function (prot) {
+      pruefe('Baustelle auf der Gegenfahrbahn: keine Ansage', prot.length === 0, zeigeProt(prot));
+      w._navi.hindernisSetzen(0, 0, 'baustelle', null);      // aufraeumen
+    });
+  }
+
+  // Autobahn-Dienst und Landesmeldungen mit erfundenen Meldungen entlang
+  // einer geraden Strecke nach Norden
+  function autobahn() {
+    var start = [48.60, 9.10], route = [];
+    for (var i = 0; i <= 100; i++) route.push(nord(start, i * 50));    // 5 km
+    var jetzt = Date.now(), std = 3600000;
+    function linie(von, meter) {          // Geometrie in Fahrtrichtung (+) oder dagegen (-)
+      var a = von, b = nord(von, meter);
+      return { type: 'LineString', coordinates: [[a[1], a[0]], [b[1], b[0]]] };
+    }
+    function meldung(p, titel, extra) {
+      var m = { title: 'A8 | ' + titel, subtitle: 'Stuttgart -> Karlsruhe', isBlocked: 'false', future: false,
+                coordinate: { lat: String(p[0]), long: String(p[1]) }, description: [] };
+      for (var k in extra) m[k] = extra[k];
+      return m;
+    }
+    var jetztSperre = route[20], alteSperre = route[40], spaeteSperre = route[50], rampe = route[60];
+    var bauGut = route[30], bauGegen = ost(route[70], 30), bauOhne = ost(route[80], 35), bauKuenftig = route[90];
+    var closure = [
+      meldung(jetztSperre, 'AS Eins - AS Zwei', { isBlocked: 'true', geometry: linie(jetztSperre, 800),
+              description: fenster(jetzt - std, jetzt + 5 * std) }),
+      meldung(alteSperre, 'AS Zwei - AS Drei', { isBlocked: 'true', geometry: linie(alteSperre, 800),
+              description: fenster(jetzt - 30 * std, jetzt - 20 * std) }),
+      meldung(spaeteSperre, 'AS Drei - AS Vier', { isBlocked: 'true', geometry: linie(spaeteSperre, 800),
+              description: fenster(jetzt + 20 * std, jetzt + 30 * std) }),
+      meldung(rampe, 'AS Vier Ausfahrt gesperrt', { isBlocked: 'true', geometry: linie(rampe, 300),
+              description: fenster(jetzt - std, jetzt + std) })
+    ];
+    var roadworks = [
+      meldung(bauGut, 'Baustelle Eins', { geometry: linie(bauGut, 1500) }),
+      meldung(bauGegen, 'Baustelle Gegenrichtung', { geometry: linie(nord(bauGegen, 1500), -1500) }),
+      meldung(bauOhne, 'Baustelle ohne Geometrie', {}),
+      meldung(bauKuenftig, 'Baustelle kommt erst', { future: true, geometry: linie(bauKuenftig, 1500) })
+    ];
+    var ticOrt = ost(route[95], 20), ticSperre = ost(route[100], 20);
+    var tic = '<?xml version="1.0"?><r>' +
+      '<TrafficAndTravelEvent><Text>Musterstrasse Fahrstreifen verengt, Baustelle</Text>' +
+      '<Latitude>' + ticOrt[0] + '</Latitude><Longitude>' + ticOrt[1] + '</Longitude></TrafficAndTravelEvent>' +
+      '<TrafficAndTravelEvent><Text>Musterweg gesperrt, Baustelle</Text>' +
+      '<Latitude>' + ticSperre[0] + '</Latitude><Longitude>' + ticSperre[1] + '</Longitude></TrafficAndTravelEvent>' +
+      '</r>';
+    attrappe(/autobahn\.de\/.*\/services\/closure/, function () { return { inhalt: { closure: closure } }; });
+    attrappe(/autobahn\.de\/.*\/services\/roadworks/, function () { return { inhalt: { roadworks: roadworks } }; });
+    attrappe(/autobahn\.de\/.*\/services\/warning/, function () { return { inhalt: { warning: [] } }; });
+    attrappe(/mobidata-bw\.de/, function () { return { inhalt: tic }; });
+
+    function nahe(liste, p) { return liste.some(function (x) { return w.Verkehr.abstand(x.ort, p) < 5; }); }
+    return w.Verkehr.alleStoerungen(route, ['A8'], '', 5, 6).then(function (st) {
+      var sperrenTexte = st.map(function (s) { return s.text + (s.hart ? ' (hart)' : ''); }).join('\n');
+      var hinw = (st.hinweise || []).map(function (h) { return h.art + ': ' + h.text; }).join('\n');
+      pruefe('Sperrung im Zeitfenster wird harte Sperre', st.some(function (s) {
+        return s.hart && s.art === 'sperrung' && w.Verkehr.abstand(s.ort, jetztSperre) < 5; }), sperrenTexte);
+      pruefe('Sperrung außerhalb des Zeitfensters (vorbei/kommt erst) bleibt draußen',
+             !nahe(st, alteSperre) && !nahe(st, spaeteSperre), sperrenTexte);
+      pruefe('Gesperrte Ausfahrt sperrt nicht die Autobahn', !nahe(st, rampe), sperrenTexte);
+      pruefe('Baustellen landen nie in der Sperrliste',
+             !nahe(st, bauGut) && !nahe(st, bauGegen) && !nahe(st, bauOhne) && !nahe(st, ticOrt), sperrenTexte);
+      pruefe('Baustelle in Fahrtrichtung wird Ansage', nahe(st.hinweise || [], bauGut), hinw);
+      pruefe('Baustelle Gegenrichtung / ohne Richtung / künftig: keine Ansage',
+             !nahe(st.hinweise || [], bauGegen) && !nahe(st.hinweise || [], bauOhne) &&
+             !nahe(st.hinweise || [], bauKuenftig), hinw);
+      pruefe('Landesmeldung „Fahrstreifen verengt“ wird Ansage', nahe(st.hinweise || [], ticOrt), hinw);
+      pruefe('Landesmeldung „gesperrt“ bleibt harte Sperre (unverändert)',
+             st.some(function (s) { return s.hart && s.quelle === 'tic'; }), sperrenTexte);
+      // Nachmessen: die Sperre im Fenster gilt noch
+      var sp = st.filter(function (s) { return s.art === 'sperrung'; })[0];
+      return sp ? w.Verkehr.nachmessen([sp], '') : ['fehlt'];
+    }).then(function (befund) {
+      pruefe('Nachmessen: Sperrung im Zeitfenster gilt noch', befund[0] === 'stau', 'Befund: ' + befund[0]);
+      closure[0].description = fenster(jetzt - 10 * std, jetzt - std);   // Fenster vorbei
+      return w.Verkehr.nachmessen([{ quelle: 'autobahn', art: 'sperrung', ref: 'A8', ort: jetztSperre, radius: 1200 }], '');
+    }).then(function (befund) {
+      pruefe('Nachmessen: nach dem Zeitfenster frei', befund[0] === 'frei', 'Befund: ' + befund[0]);
+    });
+  }
+
+  // Langsame Antwort auf eine alte Eingabe darf die neueren Vorschlaege
+  // nicht ueberschreiben
+  function suche() {
+    function antwort(name) {
+      return { features: [{ geometry: { coordinates: [9.0, 48.5] }, properties: { name: name, city: 'Prüfstadt' } }] };
+    }
+    attrappe(/photon\.komoot\.io.*[?&]q=Glob(&|$)/, function () { return { inhalt: antwort('Alte Antwort'), ms: 1500 }; });
+    attrappe(/photon\.komoot\.io.*[?&]q=Globus(&|$)/, function () { return { inhalt: antwort('Neue Antwort'), ms: 100 }; });
+    var feld = w.document.getElementById('suche'), liste = w.document.getElementById('vorschlaege');
+    function tippe(t) { feld.value = t; feld.dispatchEvent(new w.Event('input', { bubbles: true })); }
+    tippe('Glob');
+    return warte(800).then(function () {
+      tippe('Globus');
+      return warte(2500);
+    }).then(function () {
+      var t = liste.textContent;
+      pruefe('Suche: alte Antwort überschreibt die neue nicht',
+             !liste.hidden && t.indexOf('Neue Antwort') >= 0 && t.indexOf('Alte Antwort') < 0, 'Liste: ' + t);
+      tippe('');
+    });
+  }
+
+  /* ---------------------------------------------------------------- Ablauf */
+  function bereit() {
+    return new Promise(function (ok, nein) {
+      var bis = Date.now() + 20000;
+      (function schau() {
+        try {
+          if (rahmen.contentWindow._navi && rahmen.contentWindow.pruefSetzen) return ok(rahmen.contentWindow);
+        } catch (e) {}
+        if (Date.now() > bis) return nein(new Error('App lädt nicht'));
+        setTimeout(schau, 200);
+      })();
+    });
+  }
+
+  rahmen.src = 'index.html?pruefstand&t=' + Date.now();
+  bereit().then(function (fenster) {
+    w = fenster;
+    // Stumm mitschreiben statt sprechen
+    if (w.speechSynthesis) {
+      w.speechSynthesis.speak = function (u) { gesprochen.push(u.text); };
+      w.speechSynthesis.cancel = function () {};
+    }
+    w.Verkehr.blitzerUmher = function () { return new Promise(function () {}); };
+    w.Verkehr.blitzerLaden = function () { return new Promise(function () {}); };
+    fetchErsetzen();
+    return warte(1500);   // Startmeldungen abwarten
+  }).then(function () {
+    gesprochen.length = 0;
+    var schritte = [blitzerFest, blitzerMobil, blitzerSpaet, blitzerGegenrichtung,
+                    baustelle, hindernis, baustelleGegenfahrbahn, autobahn, suche];
+    return schritte.reduce(function (k, f) {
+      return k.then(f).catch(function (e) { pruefe(f.name + ' lief nicht durch', false, String(e && e.stack || e)); });
+    }, Promise.resolve());
+  }).catch(function (e) {
+    pruefe('Prüfstand startet', false, String(e && e.message || e));
+  }).then(function () {
+    zuruecksetzen();
+    var ok = gesamt - fehler.length;
+    var s = document.getElementById('stand');
+    s.textContent = (fehler.length ? '✗ ' : '✓ ') + ok + ' von ' + gesamt + ' Prüfungen bestanden';
+    s.className = fehler.length ? 'rot' : 'gruen';
+    window.pruefErgebnis = { fertig: true, ok: ok, gesamt: gesamt, fehler: fehler };
+  });
+})();
+</script>
+</body>
+</html>

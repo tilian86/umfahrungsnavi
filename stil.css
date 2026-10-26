@@ -372,3 +372,9 @@ html, body {
 body.navi #suchzeile, body.navi #vorschlaege, body.navi #hausnr, body.navi #fav,
 body.navi #stoppliste, body.navi #varianten { display: none; }
 body.navi #status { font-size: 14px; opacity: .9; }
+.hind-punkt {
+  width: 22px; height: 22px; border-radius: 6px;
+  background: #ffb454; border: 2px solid #fff;
+  font: 12px/18px -apple-system, sans-serif; text-align: center;
+  box-shadow: 0 1px 4px rgba(0,0,0,.45);
+}

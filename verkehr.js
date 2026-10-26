@@ -473,6 +473,105 @@
     return ort && !isNaN(ort[0]) && !isNaN(ort[1]) ? ort : null;
   }
 
+  // Baustellen und Sperrungen einer Autobahn ('roadworks', 'closure') -
+  // oder FEHLT. Gleiche Form wie die Warnungen.
+  function dienstHolen(ref, art) {
+    return abruf(AUTOBAHN + encodeURIComponent(ref) + '/services/' + art, 10000, 'json')
+      .then(function (d) { return (d && d[art]) || []; })
+      .catch(function () { return FEHLT; });
+  }
+
+  // Zeitfenster aus dem Beschreibungstext, z. B. "24.10.26 19:00 bis zum
+  // 25.10.26 06:00 Uhr" oder "Beginn: 24.10.26 um 19:00 Uhr / Ende: ...".
+  // Je zwei Zeitpunkte hintereinander sind ein Fenster. true/false, ob
+  // gerade eines gilt - null, wenn im Text keines steht.
+  function fensterGilt(w, jetzt) {
+    var text = [].concat(w.description || []).join(' ');
+    var muster = /(\d{1,2})\.(\d{1,2})\.(\d{2,4}),?\s*(?:um\s*)?(\d{1,2})[:.](\d{2})/g;
+    var zeiten = [], t;
+    while ((t = muster.exec(text))) {
+      var jahr = parseInt(t[3], 10);
+      if (jahr < 100) jahr += 2000;
+      zeiten.push(new Date(jahr, parseInt(t[2], 10) - 1, parseInt(t[1], 10),
+                           parseInt(t[4], 10), parseInt(t[5], 10)).getTime());
+    }
+    if (zeiten.length < 2) return null;
+    for (var i = 0; i + 1 < zeiten.length; i += 2) {
+      if (zeiten[i] <= jetzt && jetzt <= zeiten[i + 1]) return true;
+    }
+    return false;
+  }
+
+  // Zeigt die Meldung in die Gegenrichtung? Nur ueber die Geometrie zu
+  // entscheiden - die beiden Fahrbahnen liegen wenige Meter auseinander.
+  // null: keine Geometrie, Richtung unbekannt.
+  function gegenrichtung(w, lage) {
+    var geo = w.geometry && w.geometry.coordinates;
+    if (!geo || geo.length < 2 || lage.kurs === null) return null;
+    var a = [geo[0][1], geo[0][0]];
+    var b = [geo[geo.length - 1][1], geo[geo.length - 1][0]];
+    if (abstand(a, b) <= 200) return null;
+    return winkelDiff(peilung(a, b), lage.kurs) > 90;
+  }
+
+  // Auf- und Abfahrten: eine Sperre dort wuerde als Zone die ganze
+  // Autobahn an der Anschlussstelle mitsperren
+  var RAMPE = /ausfahrt|auffahrt|zufahrt|abfahrt|rampe|anschlussstelle .*(gesperrt|sperrung)/i;
+
+  // Baustellen und Sperrungen entlang der Route. Gibt {sperren, hinweise}:
+  // - sperren: Vollsperrungen, deren Zeitfenster JETZT gilt (hart, wie
+  //   eine gesperrte Warnung).
+  // - hinweise: Baustellen, nur zum Ansagen. Die duerfen NIE in die
+  //   Sperren - jeder Eintrag dort wird zum Nogo, und Baustellen gibt es
+  //   auf der A8 ueber hundert.
+  function autobahnHindernisse(refs, route) {
+    var leer = { sperren: [], hinweise: [] };
+    if (!refs || !refs.length) return Promise.resolve(leer);
+    var gefragt = refs.slice(0, 4), jetzt = Date.now();
+    var anfragen = [];
+    gefragt.forEach(function (ref) {
+      anfragen.push(dienstHolen(ref, 'closure'), dienstHolen(ref, 'roadworks'));
+    });
+    return Promise.all(anfragen).then(function (listen) {
+      var raus = { sperren: [], hinweise: [] }, fehlt = 0;
+      listen.forEach(function (liste, k) {
+        if (liste === FEHLT) { fehlt++; return; }
+        var sperre = k % 2 === 0, ref = gefragt[k >> 1];
+        liste.forEach(function (w) {
+          var ort = warnungsOrt(w);
+          if (!ort || String(w.future) === 'true') return;
+          var lage = anDerRoute(ort, route);
+          // Knapp: die Gegenfahrbahn liegt nur 20 bis 40 m daneben
+          if (lage.abstand > 60) return;
+          var gegen = gegenrichtung(w, lage);
+          if (gegen === true) return;
+          if (gegen === null && lage.abstand > 25) return;
+          var fenster = fensterGilt(w, jetzt);
+          var titel = (w.title || '').split('|').slice(-1)[0].trim();
+          if (sperre) {
+            if (fenster !== true) return;           // nur im Zeitfenster
+            if (RAMPE.test(titel + ' ' + [].concat(w.description || []).join(' '))) return;
+            raus.sperren.push({
+              ort: ort, index: lage.index, minuten: 0, tempo: null,
+              hart: true, radius: 1200,
+              text: 'Sperrung ' + titel, ref: ref, art: 'sperrung', quelle: 'autobahn'
+            });
+            return;
+          }
+          if (fenster === false) return;
+          var beginn = Date.parse(w.startTimestamp);
+          if (!isNaN(beginn) && beginn > jetzt) return;
+          raus.hinweise.push({
+            ort: ort, index: lage.index, kurs: lage.kurs, art: 'baustelle',
+            text: 'Baustelle ' + titel, quelle: 'autobahn'
+          });
+        });
+      });
+      raus.ausfall = fehlt > 0;
+      return raus;
+    });
+  }
+
   function autobahnStoerungen(refs, route, schwelle) {
     if (!refs || !refs.length) return Promise.resolve([]);
     var gefragt = refs.slice(0, 4);
@@ -661,9 +760,13 @@
     });
   }
 
+  // Was in einer Landesmeldung nach Hindernis klingt, aber nicht nach Stau
+  var HINDERNIS = /baustelle|fahrstreifen|verengt|liegengeblieben|pannenfahrzeug|defekt|gegenstand|hindernis/;
+
   function ticStoerungen(route, schwelle) {
     return ticLaden().then(function (meldungen) {
       var raus = [];
+      raus.hinweise = [];
       meldungen.forEach(function (m) {
         var beste = null;
         m.orte.forEach(function (o) {
@@ -678,7 +781,18 @@
         var minuten = hart ? 0 : (t.indexOf('stau') >= 0 ? 10 :
                       t.indexOf('unfall') >= 0 ? 8 :
                       t.indexOf('stockend') >= 0 ? 5 : 0);
-        if (!hart && minuten < schwelle) return;
+        if (!hart && minuten < schwelle) {
+          // Keine Stoerung fuers Umfahren - aber vielleicht eine zum Ansagen.
+          // Enger als die Sperren, damit die Querstrasse nicht mitzaehlt.
+          if (beste.abstand < 80 && HINDERNIS.test(t)) {
+            raus.hinweise.push({
+              ort: beste.ort, index: beste.index, kurs: null,
+              art: /baustelle|fahrstreifen|verengt/.test(t) ? 'baustelle' : 'hindernis',
+              text: m.text.slice(0, 60), quelle: 'tic'
+            });
+          }
+          return;
+        }
         raus.push({
           ort: beste.ort, index: beste.index,
           minuten: minuten, tempo: null, hart: hart,
@@ -697,9 +811,10 @@
     return Promise.all([
       autobahnStoerungen(refs, route, schwelle),
       tomtomFluss(route, schluessel, schwelle, sichtKm || 15),
-      ticStoerungen(route, schwelle)
+      ticStoerungen(route, schwelle),
+      autobahnHindernisse(refs, route)
     ]).then(function (teile) {
-      var alle = teile[0].concat(teile[1], teile[2]);
+      var alle = teile[0].concat(teile[1], teile[2], teile[3].sperren);
       // Doppelte aussortieren: melden Autobahn-API und TomTom denselben Stau,
       // gewinnt die amtliche Meldung, weil sie die Minuten sauberer kennt.
       // Der Mindestabstand richtet sich nach der Sperrgroesse - enge
@@ -715,6 +830,9 @@
       if (teile[0].ausfall) raus.ausfall.push('Autobahn');
       if (teile[1].ausfall) raus.ausfall.push('TomTom');
       if (teile[2].ausfall) raus.ausfall.push('Landesmeldungen');
+      if (teile[3].ausfall) raus.ausfall.push('Baustellen');
+      // Nur zum Ansagen, nie zum Sperren: Baustellen, Hindernisse, enge Stellen
+      raus.hinweise = teile[3].hinweise.concat(teile[2].hinweise || []);
       return raus;
     });
   }
@@ -732,6 +850,19 @@
         return tomtomPunkt(sp.ort, schluessel).then(function (m) {
           if (!m || m === FEHLT) return 'unbekannt';
           return stockt(m) ? 'stau' : 'frei';
+        });
+      }
+      if (sp.quelle === 'autobahn' && sp.art === 'sperrung') {
+        // Nachtsperrung: gilt, solange ihr Zeitfenster laeuft
+        if (!sp.ref) return 'unbekannt';
+        return dienstHolen(sp.ref, 'closure').then(function (liste) {
+          if (liste === FEHLT) return 'unbekannt';
+          var jetzt = Date.now();
+          var noch = liste.some(function (w) {
+            var ort = warnungsOrt(w);
+            return ort && abstand(ort, sp.ort) < 300 && fensterGilt(w, jetzt) === true;
+          });
+          return noch ? 'stau' : 'frei';
         });
       }
       if (sp.quelle === 'autobahn') {
@@ -760,6 +891,8 @@
     blitzerUmher: blitzerUmher,
     refsErmitteln: refsErmitteln,
     autobahnStoerungen: autobahnStoerungen,
+    autobahnHindernisse: autobahnHindernisse,
+    fensterGilt: fensterGilt,
     ticStoerungen: ticStoerungen,
     tomtomFluss: tomtomFluss,
     alleStoerungen: alleStoerungen,
